@@ -64,8 +64,10 @@ from bench.schema import RunRecord
 
 # ── defaults / caps ─────────────────────────────────────────────────────────
 DEFAULT_WORKERS = 8
-CALL_CAP = 50                 # max model calls per (task, arm) — matches the gate2 cap
-WALL_CAP_S = 50 * 60          # hard wall-clock watchdog per solve
+CALL_CAP = 100                # max model turns (steps) per (task, arm) — MUST match the v5 run
+                              # (mini_swe solve_instance step_limit=100) so ported A0/A3S rows and
+                              # live vendor arms share the identical turn budget.
+WALL_CAP_S = 50 * 60          # hard wall-clock watchdog per solve (matches gate2 signal.alarm(50*60))
 DEFAULT_MAX_TOKENS = 8000     # completion cap per call
 # Vertex project mirrors the v5 eval default (adaptive_context/eval/mini_swe.py).
 VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "dasein-473321")
