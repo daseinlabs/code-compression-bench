@@ -46,7 +46,7 @@ from typing import Optional
 import arms  # noqa: F401  (import side effect: registers every arm)
 from bench.arm import ArmKind, ToolAttach, get_arm, available_arms
 from bench.grader import SWEBenchGrader
-from bench.pricing import cache_frame_cost, rates_for
+from bench.pricing import price_run, rates_for
 from bench.schema import RunRecord
 
 
@@ -216,12 +216,106 @@ def _call_model(arm, messages, tools, *, model, max_tokens, usage_sink):
     if headers:
         kwargs["extra_headers"] = headers
 
+    t_call = time.time()
     resp = litellm.completion(**kwargs)
-    usage = getattr(resp, "usage", None)
-    pt = int(getattr(usage, "prompt_tokens", 0) or 0)
-    ct = int(getattr(usage, "completion_tokens", 0) or 0)
-    usage_sink.append({"prompt_tokens": pt, "completion_tokens": ct})
+    latency_s = round(time.time() - t_call, 3)
+    usage_sink.append(_extract_call_usage(resp, latency_s))
     return resp
+
+
+# transient errors that warrant an in-run retry (rate limit / timeout / 5xx).
+_RETRYABLE = ("RateLimit", "Timeout", "APIConnection", "ServiceUnavailable",
+              "InternalServer", "Overloaded", "APIError")
+
+
+def _call_model_with_retry(arm, messages, tools, *, model, max_tokens, usage_sink,
+                           max_retries: int = 2):
+    """`_call_model` with a small bounded retry on TRANSIENT model-call errors.
+
+    Returns ``(resp, retries)`` where ``retries`` is how many times this call had
+    to be re-issued before it succeeded (0 on first try). A retried call appends
+    exactly ONE usage row (the successful attempt). Persistent failures bubble up
+    as the original exception so the worker counts them as an infra failure.
+    """
+    attempt = 0
+    while True:
+        try:
+            resp = _call_model(arm, messages, tools, model=model,
+                               max_tokens=max_tokens, usage_sink=usage_sink)
+            return resp, attempt
+        except Exception as e:  # noqa: BLE001
+            name = type(e).__name__
+            transient = any(tok in name for tok in _RETRYABLE)
+            if not transient or attempt >= max_retries:
+                raise
+            attempt += 1
+            time.sleep(min(2 ** attempt, 8))  # brief backoff before the retry
+
+
+def _usage_get(usage, key: str) -> int:
+    """Read an int field off a litellm usage object whether it's attr- or dict-shaped."""
+    v = getattr(usage, key, None)
+    if v is None and isinstance(usage, dict):
+        v = usage.get(key)
+    return int(v or 0)
+
+
+def _extract_call_usage(resp, latency_s: float) -> dict:
+    """One CallUsage dict from a litellm response: tokens + REAL cache split + latency.
+
+    Reads the cache split straight from the provider usage object so pricing uses
+    the real bill (no inference) whenever it's reported:
+      - cache_creation_input_tokens : the cache WRITE (Anthropic/litellm)
+      - cache_read_input_tokens     : the cache READ (Anthropic/litellm); also
+                                      accept the OpenAI shape
+                                      usage.prompt_tokens_details.cached_tokens
+    Cache keys are emitted ONLY when the provider reported them (presence is the
+    signal pricing uses to choose the real-cache path over the inferred-growth
+    fallback); absent fields are simply omitted.
+    """
+    usage = getattr(resp, "usage", None)
+    pt = _usage_get(usage, "prompt_tokens")
+    ct = _usage_get(usage, "completion_tokens")
+    out: dict = {"prompt_tokens": pt, "completion_tokens": ct, "latency_s": latency_s}
+    if usage is None:
+        return out
+
+    # cache WRITE: Anthropic/litellm field
+    has_write = (getattr(usage, "cache_creation_input_tokens", None) is not None) or (
+        isinstance(usage, dict) and usage.get("cache_creation_input_tokens") is not None)
+    if has_write:
+        out["cache_creation_input_tokens"] = _usage_get(usage, "cache_creation_input_tokens")
+
+    # cache READ: Anthropic/litellm field, OR OpenAI-style prompt_tokens_details.cached_tokens
+    read = getattr(usage, "cache_read_input_tokens", None)
+    if read is None and isinstance(usage, dict):
+        read = usage.get("cache_read_input_tokens")
+    if read is None:
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is None and isinstance(usage, dict):
+            details = usage.get("prompt_tokens_details")
+        if details is not None:
+            read = getattr(details, "cached_tokens", None)
+            if read is None and isinstance(details, dict):
+                read = details.get("cached_tokens")
+    if read is not None:
+        out["cache_read_input_tokens"] = int(read or 0)
+
+    # Provider-convention normalization so prompt_tokens == FULL billable input
+    # (uncached + write + read) — the contract pricing.real_cache_cost expects.
+    # Anthropic/litellm reports prompt_tokens as the UNCACHED portion only, with
+    # cache_creation/cache_read as SEPARATE top-level fields, so fold them back in.
+    # OpenAI reports prompt_tokens INCLUSIVE of cached_tokens (no cache_creation
+    # field in that shape), so it's already full and we leave it.
+    # (Validate against one real Vertex/Anthropic response at smoke — see TODO.)
+    if "cache_creation_input_tokens" in out:  # Anthropic shape => prompt excludes cache
+        out["prompt_tokens"] = (
+            pt
+            + int(out.get("cache_creation_input_tokens", 0) or 0)
+            + int(out.get("cache_read_input_tokens", 0) or 0)
+        )
+
+    return out
 
 
 # ── the fixed agent loop ──────────────────────────────────────────────────────
@@ -261,6 +355,12 @@ def run_agent(
                                      f"Begin by exploring the repository to locate the bug."},
     ]
     calls = 0
+    steps = 0                 # agent loop iterations (one per model call here)
+    tool_call_count = 0       # total tool invocations issued across the run
+    retries = 0              # transient model-call retries (succeeded on retry)
+    degraded = False          # ran, but a transform/curation arm fell back
+    submitted = False
+    time_to_submit_s = 0.0
     exit_status = "incomplete"
     patch = ""
     t0 = time.time()
@@ -272,12 +372,20 @@ def run_agent(
             if time.time() - t0 > wall_cap_s:
                 exit_status = "wall_cap"
                 break
-            resp = _call_model(arm, messages, tools, model=model,
-                               max_tokens=max_tokens, usage_sink=usage)
+            resp, call_retries = _call_model_with_retry(
+                arm, messages, tools, model=model,
+                max_tokens=max_tokens, usage_sink=usage)
+            retries += call_retries
             calls += 1
+            steps += 1
+            # an arm that ran but reports a fallback marks the run degraded (measured,
+            # not fatal) — supported on transform arms that expose `last_degraded`.
+            if getattr(arm, "last_degraded", False):
+                degraded = True
             choice = resp.choices[0]
             msg = choice.message
             tool_calls = getattr(msg, "tool_calls", None) or []
+            tool_call_count += len(tool_calls)
             # record the assistant turn (preserve tool_calls for the API contract).
             asst = {"role": "assistant", "content": msg.content or ""}
             if tool_calls:
@@ -294,6 +402,8 @@ def run_agent(
                 # if it's clearly done.
                 if PATCH_SENTINEL in (msg.content or ""):
                     exit_status = "submitted"
+                    submitted = True
+                    time_to_submit_s = round(time.time() - t0, 1)
                     break
                 messages.append({
                     "role": "user",
@@ -329,6 +439,8 @@ def run_agent(
                 })
             if done:
                 exit_status = "submitted"
+                submitted = True
+                time_to_submit_s = round(time.time() - t0, 1)
                 break
         else:
             exit_status = "call_cap"
@@ -346,6 +458,13 @@ def run_agent(
 
     in_tok = sum(u["prompt_tokens"] for u in usage)
     out_tok = sum(u["completion_tokens"] for u in usage)
+    # peak single-call prompt (context-window risk; gate2 "max_prompt")
+    max_prompt = max((u["prompt_tokens"] for u in usage), default=0)
+    # mean per-call latency over the calls that reported one
+    lats = [u["latency_s"] for u in usage if u.get("latency_s") is not None]
+    mean_lat = round(sum(lats) / len(lats), 3) if lats else 0.0
+    # limit-death: hit a call/wall cap WITHOUT ever submitting (productive-death)
+    limit_death = (exit_status in ("call_cap", "wall_cap")) and not submitted
     return {
         "instance": instance_id,
         "arm": arm.name,
@@ -356,6 +475,16 @@ def run_agent(
         "output_tokens": out_tok,
         "usage": usage,
         "wall_s": round(time.time() - t0, 1),
+        # outcome / effort / reliability signals
+        "submitted": submitted,
+        "limit_death": limit_death,
+        "steps": steps,
+        "tool_calls": tool_call_count,
+        "time_to_submit_s": time_to_submit_s,
+        "mean_call_latency_s": mean_lat,
+        "max_prompt_tokens": max_prompt,
+        "retries": retries,
+        "degraded": degraded,
     }
 
 
@@ -384,9 +513,11 @@ def _worker(job: tuple) -> dict:
         g = grader.grade(instance_id, raw["patch"])
 
         rates = rates_for(model)
-        prompts = [u["prompt_tokens"] for u in raw["usage"]]
-        comps = [u["completion_tokens"] for u in raw["usage"]]
-        cb = cache_frame_cost(prompts, comps, rates)
+        # Price from the REAL per-call cache fields when the provider reported
+        # them; fall back to the inferred-from-prompt-growth frame otherwise.
+        # price_run picks the path; both yield the full token + dollar split.
+        cb = price_run(raw["usage"], rates)
+        uncached = cb.uncached_input_tok
 
         rec = RunRecord(
             instance=instance_id,
@@ -401,17 +532,36 @@ def _worker(job: tuple) -> dict:
             wall_s=raw["wall_s"],
             cost_usd=round(cb.total_usd, 6),
             patch=raw["patch"],
-            model=model,
-            exit_status=raw["exit_status"],
+            # ── outcome ──
+            # the regression guard held iff every PASS_TO_PASS test still passes
+            # (true by default when the instance declares none).
+            pass_to_pass_ok=(g.n_pass_to_pass_passed >= g.n_pass_to_pass),
+            limit_death=bool(raw["limit_death"]),
+            # ── effort / latency ──
+            steps=raw["steps"],
+            tool_calls=raw["tool_calls"],
+            time_to_submit_s=raw["time_to_submit_s"],
+            mean_call_latency_s=raw["mean_call_latency_s"],
+            # ── tokens (peak + uncached) ──
+            max_prompt_tokens=raw["max_prompt_tokens"],
+            uncached_input_tokens=uncached,
+            # ── cache ──
+            cache_hit_rate=round(cb.cache_hit_rate, 4),
+            # ── cost (both frames) ──
+            cost_usd_list=round(cb.list_usd, 6),
             cache_write_usd=round(cb.write_usd, 6),
             cache_read_usd=round(cb.read_usd, 6),
             output_usd=round(cb.output_usd, 6),
+            # ── reliability ──
+            retries=raw["retries"],
+            degraded=bool(raw["degraded"]),
+            # ── diagnostic ──
+            model=model,
+            exit_status=raw["exit_status"],
             usage=raw["usage"],
             infra_failed=False,
             error=("grade: " + g.error) if g.error else "",
         )
-        # The list-price (flat) bound is recomputed by the report layer from the
-        # canonical token fields, so the ledger stays to the RunRecord schema.
         return rec.to_json()
     except RunInfraError as e:
         return _infra_stub(instance_id, arm_name, model, str(e), t0)

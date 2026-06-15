@@ -26,19 +26,52 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from . import style
-from .pricing import cache_frame_cost, flat_cost, rates_for
+from .pricing import cache_frame_cost, flat_cost, price_run, rates_for
 from .schema import AggResult, RunRecord
+
+
+def _median(xs: list[float]) -> float:
+    """Plain median (stdlib statistics not used to keep the import surface tiny)."""
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return 0.0
+    mid = n // 2
+    return s[mid] if n % 2 else 0.5 * (s[mid - 1] + s[mid])
+
+
+def _uncached_input_tok(r: RunRecord) -> int:
+    """Per-run uncached input = input billed at the full input rate (neither
+    written nor read). Prefer the record's own field; else reconstruct from the
+    token identity input − write − read (floored at 0)."""
+    u = getattr(r, "uncached_input_tokens", 0) or 0
+    if u:
+        return int(u)
+    return max(0, int(r.input_tokens) - int(r.cache_write_tok) - int(r.cache_read_tok))
 
 
 # ── aggregation (ledger -> per-arm rollups) ──────────────────────────────────
 def aggregate(records: Iterable[RunRecord],
-              model_id: str = "") -> list[AggResult]:
+              model_id: str = "", *, baseline_arm: str = "baseline") -> list[AggResult]:
     """Roll per-run RunRecords up into one AggResult per arm.
 
-    infra_failed rows are excluded. Dollar fields prefer the record's own
-    cost_usd (already cache-priced by the runner); when absent (0) they are
-    recomputed from the per-call `usage` series via cache_frame_cost so figures
-    can be rebuilt from a bare ledger. cost_usd_flat is the list-price bound.
+    infra_failed rows are excluded. Computes the FULL KPI set:
+
+      - cost (both frames): cache-aware total (prefers the record's own
+        runner-priced cost_usd; else re-prices the usage series via price_run,
+        which itself prefers the REAL cache fields and falls back to prompt-growth
+        inference) AND the list-price upper bound (list_frame_cost via flat_cost).
+      - cache: token-weighted cache_hit_rate = Σread / max(1, Σread+Σwrite+Σuncached),
+        plus the per-rate dollar buckets (write/read/output $).
+      - outcome/effort: limit_death_rate, mean_steps, mean time-to-submit (over
+        runs that submitted), mean peak single-call prompt.
+      - cost summaries: median per-run cost, cost_per_success (alias of
+        cost_per_solved_usd).
+
+    vs-baseline savings %s are NOT filled here (the aggregator doesn't pick a
+    baseline policy); `fill_savings()` / the report fills them once the baseline
+    arm is chosen. `baseline_arm` is accepted for signature symmetry but only
+    used by the report layer.
     """
     by: dict[str, list[RunRecord]] = {}
     for r in records:
@@ -54,24 +87,49 @@ def aggregate(records: Iterable[RunRecord],
         out_tok = sum(r.output_tokens for r in rs)
         cw = sum(r.cache_write_tok for r in rs)
         cr = sum(r.cache_read_tok for r in rs)
+        unc = sum(_uncached_input_tok(r) for r in rs)
 
         cost = 0.0
         cost_flat = 0.0
+        write_usd = read_usd = output_usd = 0.0
+        per_run_cost: list[float] = []
         for r in rs:
             mid = r.model or model_id
             rates = rates_for(mid)
+            # cache-aware total: trust the runner's own price when present,
+            # otherwise re-price the usage series (real fields preferred).
             if r.cost_usd:
-                cost += r.cost_usd
+                rc = float(r.cost_usd)
             elif r.usage:
-                cb = cache_frame_cost(
-                    [u["prompt_tokens"] for u in r.usage],
-                    [u["completion_tokens"] for u in r.usage],
-                    rates,
-                )
-                cost += cb.total_usd
+                rc = price_run(r.usage, rates).total_usd
             else:
-                cost += flat_cost(r.input_tokens, r.output_tokens, rates)
+                rc = flat_cost(r.input_tokens, r.output_tokens, rates)
+            cost += rc
+            per_run_cost.append(rc)
             cost_flat += flat_cost(r.input_tokens, r.output_tokens, rates)
+            # per-rate dollar buckets: prefer the record's own split; else derive
+            # the cache buckets at table rates and back out output as the residual.
+            wr = getattr(r, "cache_write_usd", 0.0) or 0.0
+            rr = getattr(r, "cache_read_usd", 0.0) or 0.0
+            orr = getattr(r, "output_usd", 0.0) or 0.0
+            if not (wr or rr or orr):
+                wr = r.cache_write_tok / 1e6 * rates["cache_write"]
+                rr = r.cache_read_tok / 1e6 * rates["cache_read"]
+                orr = r.output_tokens / 1e6 * rates["output"]
+            write_usd += wr
+            read_usd += rr
+            output_usd += orr
+
+        # token-weighted hit rate across the whole arm
+        denom = cr + cw + unc
+        hit_rate = cr / denom if denom else 0.0
+
+        # outcome / effort
+        limit_deaths = sum(1 for r in rs if getattr(r, "limit_death", False))
+        steps = [getattr(r, "steps", 0) or r.calls for r in rs]
+        submitted = [getattr(r, "time_to_submit_s", 0.0) for r in rs
+                     if getattr(r, "time_to_submit_s", 0.0)]
+        peaks = [getattr(r, "max_prompt_tokens", 0) for r in rs]
 
         out.append(AggResult(
             arm=arm, n=n, n_success=n_succ,
@@ -83,10 +141,42 @@ def aggregate(records: Iterable[RunRecord],
             mean_calls=sum(r.calls for r in rs) / n if n else 0.0,
             mean_wall_s=sum(r.wall_s for r in rs) / n if n else 0.0,
             total_wall_s=sum(r.wall_s for r in rs),
+            # outcome / effort
+            limit_death_rate=limit_deaths / n if n else 0.0,
+            mean_steps=sum(steps) / n if n else 0.0,
+            mean_time_to_submit_s=sum(submitted) / len(submitted) if submitted else 0.0,
+            mean_max_prompt_tokens=sum(peaks) / n if n else 0.0,
+            # cache (token-weighted)
+            cache_hit_rate=hit_rate,
+            cache_write_usd=write_usd,
+            cache_read_usd=read_usd,
+            output_usd=output_usd,
+            # cost summaries
+            median_cost_usd=_median(per_run_cost),
+            cost_per_success=cost / max(n_succ, 1),
         ))
     # stable, friendly order: cheapest $/solved first
     out.sort(key=lambda a: a.cost_per_solved_usd)
     return out
+
+
+def fill_savings(aggs: Sequence[AggResult], baseline_arm: str = "baseline") -> None:
+    """Fill the vs-baseline savings %s in place against the baseline arm.
+
+    Positive = this arm SAVES vs the baseline. If no arm matches `baseline_arm`,
+    the most expensive arm by list-frame cost is used as the reference so the
+    deltas are still meaningful. The baseline itself gets 0.0 across the board.
+    """
+    if not aggs:
+        return
+    base = next((a for a in aggs if a.arm.lower() == baseline_arm.lower()), None)
+    if base is None:
+        base = max(aggs, key=lambda a: a.cost_usd_flat)
+    bi, bo, bc = base.input_tokens, base.output_tokens, base.cost_usd
+    for a in aggs:
+        a.input_saving_pct = 100 * (1 - a.input_tokens / bi) if bi else 0.0
+        a.output_saving_pct = 100 * (1 - a.output_tokens / bo) if bo else 0.0
+        a.cost_saving_pct = 100 * (1 - a.cost_usd / bc) if bc else 0.0
 
 
 # ── small drawing helpers ─────────────────────────────────────────────────────
@@ -405,6 +495,161 @@ def fig_leaderboard(aggs: Sequence[AggResult], results_dir: str | Path,
     return out
 
 
+# ── fig 6: cache hit rate comparison (the headline competitor claim) ─────────
+def fig_cache_hit_rate(aggs: Sequence[AggResult], results_dir: str | Path,
+                       *, stem: str = "cache_hit_rate",
+                       title: str = "Cache hit rate by arm") -> list[Path]:
+    """Per-arm token-weighted cache hit rate, gradient-filled bars sorted
+    highest-first. "Cache hit rate" is the headline number a competitor leads
+    with, so this figure is built to SING: each bar is the read share of total
+    input work, the hero arm lit with the full horizon gradient, a dotted
+    reference line at the best peer, and the read/write/uncached token split
+    annotated underneath. Measured uniformly from the API usage series across
+    every arm — vendor-internal evictions aren't observable, but everything the
+    API reports is."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    style.apply_style()
+    aggs = sorted(aggs, key=lambda a: a.cache_hit_rate, reverse=True)
+    n = len(aggs)
+    fig, ax = plt.subplots(figsize=(max(7.5, 1.3 * n + 3), 5.6))
+    style.vector_motif(ax)
+
+    width = 0.62
+    best_peer = max((a.cache_hit_rate for a in aggs if not _is_hero(a.arm)),
+                    default=0.0)
+    for i, a in enumerate(aggs):
+        h = 100 * a.cache_hit_rate
+        base = style.arm_color(a.arm, i)
+        if _is_hero(a.arm):
+            c_lo, c_hi = style.INDIGO, style.CYAN
+        else:
+            c_lo, c_hi = style.lighten(base, 0.45), base
+        if h > 0:
+            style.gradient_fill_bar(ax, i, h, width, c_lo, c_hi, radius=0.4)
+        ax.text(i, h + 1.6, f"{h:.0f}%", ha="center", va="bottom",
+                fontsize=12, fontweight="bold",
+                color=style.INDIGO if _is_hero(a.arm) else style.INK)
+        # read/write/uncached split underneath
+        tot = a.cache_read_tok + a.cache_write_tok + max(
+            0, a.input_tokens - a.cache_read_tok - a.cache_write_tok)
+        unc = max(0, a.input_tokens - a.cache_read_tok - a.cache_write_tok)
+        if tot:
+            ax.text(i, -6.5,
+                    f"R {a.cache_read_tok/1e6:.1f}M · W {a.cache_write_tok/1e6:.1f}M"
+                    f"\nU {unc/1e6:.1f}M",
+                    ha="center", va="top", fontsize=7.5, color=style.MUTED)
+
+    # dotted reference at the best peer (the bar the hero must clear)
+    if best_peer > 0:
+        ax.axhline(100 * best_peer, color=style.HAIRLINE, lw=1.2, ls=(0, (3, 3)),
+                   zorder=1)
+        ax.text(n - 0.5, 100 * best_peer + 1.0, "best peer",
+                ha="right", va="bottom", fontsize=8, color=style.MUTED)
+
+    ax.set_xticks(range(n))
+    ax.set_xticklabels([f"$\\bf{{{a.arm}}}$" if _is_hero(a.arm) else a.arm
+                        for a in aggs])
+    ax.set_ylabel("cache hit rate (read share of input, %)")
+    ax.set_ylim(-12, 100)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_title(title + "   ·   higher = more input served from cache")
+    style.style_axes(ax, ygrid=True)
+    fig.tight_layout()
+    out = _save(fig, _figdir(results_dir), stem)
+    plt.close(fig)
+    return out
+
+
+# ── fig 7: reliability — latency + limit-death ───────────────────────────────
+def fig_reliability(aggs: Sequence[AggResult], results_dir: str | Path,
+                    *, stem: str = "reliability",
+                    title: str = "Reliability: latency & limit-death") -> list[Path]:
+    """Two-panel reliability story per arm. LEFT: mean wall-clock seconds per run
+    (gradient bars, lower is better). RIGHT: limit-death rate — the share of runs
+    that hit the call/wall cap WITHOUT ever submitting, a productive-death failure
+    mode distinct from a graded wrong answer. A compression layer that bloats
+    context or stalls shows up here even when its $/solved looks fine, so this
+    figure guards the headline against a hollow win."""
+    import matplotlib.pyplot as plt
+
+    style.apply_style()
+    arms = sorted(aggs, key=lambda a: a.mean_wall_s)
+    n = len(arms)
+    # explicit margins (not tight_layout): the gradient bars are aspect="auto"
+    # imshow artists, which tight_layout flags as incompatible.
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(max(10.0, 1.5 * n + 5), 5.4))
+
+    # LEFT — mean wall seconds
+    width = 0.62
+    wmax = max((a.mean_wall_s for a in arms), default=1.0) or 1.0
+    for i, a in enumerate(arms):
+        h = a.mean_wall_s
+        base = style.arm_color(a.arm, i)
+        c_lo, c_hi = ((style.INDIGO, style.CYAN) if _is_hero(a.arm)
+                      else (style.lighten(base, 0.45), base))
+        if h > 0:
+            style.gradient_fill_bar(axL, i, h, width, c_lo, c_hi,
+                                    radius=min(0.1, h * 0.02))
+        axL.text(i, h + wmax * 0.025, f"{h:.0f}s", ha="center", va="bottom",
+                 fontsize=10, fontweight="bold",
+                 color=style.INDIGO if _is_hero(a.arm) else style.INK)
+        if a.mean_time_to_submit_s:
+            axL.text(i, -wmax * 0.05, f"submit {a.mean_time_to_submit_s:.0f}s",
+                     ha="center", va="top", fontsize=7.5, color=style.MUTED)
+    axL.set_xticks(range(n))
+    axL.set_xticklabels([f"$\\bf{{{a.arm}}}$" if _is_hero(a.arm) else a.arm
+                         for a in arms], fontsize=9)
+    axL.set_ylabel("mean wall time per run (s)")
+    axL.set_ylim(-wmax * 0.12, wmax * 1.18)
+    axL.set_title("Latency  ·  lower is better")
+    style.style_axes(axL, ygrid=True)
+
+    # RIGHT — limit-death rate (sorted lowest first; lower is better)
+    armsR = sorted(aggs, key=lambda a: a.limit_death_rate)
+    dmax = max((a.limit_death_rate for a in armsR), default=0.0)
+    ymax = max(0.05, dmax * 1.25)
+    for i, a in enumerate(armsR):
+        h = a.limit_death_rate
+        base = style.arm_color(a.arm, i)
+        deaths = round(h * a.n)
+        if h <= 0:
+            # a perfect record: no bar to draw (a zero-height gradient fill is a
+            # degenerate, singular imshow extent). Mark it as a deliberate
+            # "clean" tick + label instead, so the win reads, not a gap.
+            axR.plot([i - width / 2, i + width / 2], [0, 0],
+                     color=style.MINT, lw=3, solid_capstyle="round", zorder=3)
+            axR.text(i, ymax * 0.03, "clean", ha="center", va="bottom",
+                     fontsize=10, fontweight="bold", color=style.MINT)
+        else:
+            # rose when any deaths — reliability reads at a glance
+            if _is_hero(a.arm):
+                c_lo, c_hi = style.lighten(style.ROSE, 0.3), style.ROSE
+            else:
+                c_lo, c_hi = style.lighten(base, 0.45), base
+            style.gradient_fill_bar(axR, i, h, width, c_lo, c_hi,
+                                    radius=min(0.004, h * 0.05))
+            axR.text(i, h + ymax * 0.03, f"{100*h:.0f}%", ha="center", va="bottom",
+                     fontsize=10, fontweight="bold",
+                     color=style.INDIGO if _is_hero(a.arm) else style.INK)
+        axR.text(i, -ymax * 0.05, f"{deaths}/{a.n}", ha="center", va="top",
+                 fontsize=7.5, color=style.MUTED)
+    axR.set_xticks(range(n))
+    axR.set_xticklabels([f"$\\bf{{{a.arm}}}$" if _is_hero(a.arm) else a.arm
+                         for a in armsR], fontsize=9)
+    axR.set_ylabel("limit-death rate (capped without submitting)")
+    axR.set_ylim(-ymax * 0.12, ymax)
+    axR.set_title("Limit-death  ·  lower is better")
+    style.style_axes(axR, ygrid=True)
+
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=0.99)
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.86, bottom=0.12, wspace=0.30)
+    out = _save(fig, _figdir(results_dir), stem)
+    plt.close(fig)
+    return out
+
+
 # ── one-call orchestrator ─────────────────────────────────────────────────────
 def render_all(records: Sequence[RunRecord], results_dir: str | Path,
                *, aggs: Optional[Sequence[AggResult]] = None,
@@ -419,4 +664,7 @@ def render_all(records: Sequence[RunRecord], results_dir: str | Path,
     out["tokens_saved"] = fig_tokens_saved(A, results_dir)
     out["cost_distribution"] = fig_cost_distribution(records, results_dir)
     out["leaderboard"] = fig_leaderboard(A, results_dir)
+    # new KPI figures: the headline cache-hit-rate claim + reliability guardrail
+    out["cache_hit_rate"] = fig_cache_hit_rate(A, results_dir)
+    out["reliability"] = fig_reliability(A, results_dir)
     return out

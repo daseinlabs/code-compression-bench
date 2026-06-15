@@ -11,12 +11,28 @@ PRICE_TABLE is $/MTok. Rates are seeded for common Sonnet/Opus/Haiku and a few
 OpenAI/Gemini rows; override or extend at the call site. All figures are public
 list-price approximations — confirm against your provider's current rates.
 
-The cache-frame cost function reimplements the logic of the reference
-`cache_price()` (in meta_learning/scripts/g200_artifacts.py) as standalone code:
-per call, the GROWTH in prompt_tokens over the prior call is priced as a write,
-the prior prefix is priced as a read, and completion tokens are priced flat. A
-prompt that SHRINKS (a compression arm trims the transcript) is handled by the
-`shrink_fresh_tokens` hook so the dropped prefix is not mis-billed as a write.
+Two pricing paths, in priority order:
+
+1. REAL cache fields (preferred). When the provider reports the cache split per
+   call — usage.cache_creation_input_tokens (the WRITE) and
+   usage.cache_read_input_tokens (the READ; OpenAI reports the read as
+   usage.prompt_tokens_details.cached_tokens) — we price exactly what the bill
+   says: writes at the cache-write rate, reads at the cache-read rate, the
+   remaining uncached input (prompt_tokens − write − read) at the full input
+   rate, and completion flat. No inference. See `real_cache_cost()`.
+
+2. INFERRED-from-prompt-growth (FALLBACK). When a call lacks the cache fields,
+   the cache-frame cost function reimplements the logic of the reference
+   `cache_price()` (in meta_learning/scripts/g200_artifacts.py) as standalone
+   code: per call, the GROWTH in prompt_tokens over the prior call is priced as
+   a write, the prior prefix is priced as a read, and completion tokens are
+   priced flat. A prompt that SHRINKS (a compression arm trims the transcript)
+   is handled by the `shrink_fresh_tokens` hook so the dropped prefix is not
+   mis-billed as a write. See `cache_frame_cost()`.
+
+The LIST-frame cost (`list_frame_cost()`) is the naive upper bound: every input
+token at the full input rate (no cache credit) + output flat. It is the "what a
+non-caching bill would be" ceiling reported alongside the cache-aware figure.
 """
 
 from __future__ import annotations
@@ -26,45 +42,81 @@ from typing import Callable, Iterable, Optional
 
 
 # ── price table: $/MTok = dollars per million tokens ────────────────────────
-# cache_write : first-seen / freshly-appended input tokens (full input rate)
-# cache_read  : cached prefix re-sent on a later call (discounted)
+# input       : uncached / first-seen input tokens at the BASE input rate (the
+#               list-frame input rate; used for uncached_input_tokens and the
+#               list-frame upper bound)
+# cache_write : freshly-cached input tokens at the cache-WRITE rate (Anthropic's
+#               write rate is 1.25x the base input rate)
+# cache_read  : cached prefix re-sent on a later call, at the cache-READ rate
 # output      : completion tokens (flat)
+#
+# Back-compat: a row may omit "input"; `_rate(rates, "input")` then falls back to
+# "cache_write" so the inferred-growth path (which has no separate uncached bucket)
+# and any externally-supplied 3-key override still price correctly.
 PRICE_TABLE: dict[str, dict[str, float]] = {
     # Anthropic Claude (list price, $/MTok)
-    "claude-sonnet": {"cache_write": 3.75, "cache_read": 0.30, "output": 15.0},
-    "claude-opus":   {"cache_write": 6.25, "cache_read": 0.50, "output": 25.0},
-    "claude-haiku":  {"cache_write": 1.25, "cache_read": 0.10, "output": 5.0},
+    "claude-sonnet": {"input": 3.0,  "cache_write": 3.75, "cache_read": 0.30, "output": 15.0},
+    "claude-opus":   {"input": 5.0,  "cache_write": 6.25, "cache_read": 0.50, "output": 25.0},
+    "claude-haiku":  {"input": 1.0,  "cache_write": 1.25, "cache_read": 0.10, "output": 5.0},
     # OpenAI (approximate; confirm current rates)
-    "gpt-4o":        {"cache_write": 2.50, "cache_read": 1.25, "output": 10.0},
-    "gpt-4o-mini":   {"cache_write": 0.15, "cache_read": 0.075, "output": 0.60},
+    "gpt-4o":        {"input": 2.50, "cache_write": 2.50, "cache_read": 1.25, "output": 10.0},
+    "gpt-4o-mini":   {"input": 0.15, "cache_write": 0.15, "cache_read": 0.075, "output": 0.60},
     # Google Gemini (approximate; implicit caching)
-    "gemini-1.5-pro":   {"cache_write": 1.25, "cache_read": 0.3125, "output": 5.0},
-    "gemini-1.5-flash": {"cache_write": 0.075, "cache_read": 0.01875, "output": 0.30},
+    "gemini-1.5-pro":   {"input": 1.25,  "cache_write": 1.25,  "cache_read": 0.3125,  "output": 5.0},
+    "gemini-1.5-flash": {"input": 0.075, "cache_write": 0.075, "cache_read": 0.01875, "output": 0.30},
 }
 
 # Fallback used when a model id matches no table row (and no override given).
-DEFAULT_RATES: dict[str, float] = {"cache_write": 3.75, "cache_read": 0.30, "output": 15.0}
+DEFAULT_RATES: dict[str, float] = {
+    "input": 3.0, "cache_write": 3.75, "cache_read": 0.30, "output": 15.0,
+}
+
+
+def _rate(rates: dict[str, float], key: str) -> float:
+    """Look up a $/MTok rate, with input -> cache_write back-compat fallback.
+
+    A 3-key {cache_write, cache_read, output} dict (the old contract, or an
+    external override) has no "input" rate; for it the uncached/list input rate
+    falls back to cache_write so nothing under-prices silently.
+    """
+    if key in rates:
+        return rates[key]
+    if key == "input":
+        return rates.get("cache_write", DEFAULT_RATES["input"])
+    return rates.get(key, 0.0)
 
 
 @dataclass
 class CostBreakdown:
     """Dollar decomposition of one run plus the token counts that produced it."""
 
-    write_usd: float          # freshly-appended input tokens, priced at cache_write
+    write_usd: float          # cache-write tokens, priced at cache_write
     read_usd: float           # re-sent cached prefix, priced at cache_read
     output_usd: float         # completion tokens, priced at output
     cache_write_tok: int      # total tokens billed as writes
     cache_read_tok: int       # total tokens billed as reads
     output_tok: int           # total completion tokens
+    # real-cache path only (0 on the inferred-growth path, which has no separate
+    # uncached bucket — there, growth==write absorbs the new input):
+    uncached_usd: float = 0.0          # uncached input tokens, priced at input rate
+    uncached_input_tok: int = 0        # total input tokens billed at the full input rate
+    # list-frame upper bound: every input token at the base input rate + output flat
+    list_usd: float = 0.0
 
     @property
     def input_usd(self) -> float:
-        """Input bill = writes + reads (excludes output)."""
-        return self.write_usd + self.read_usd
+        """Input bill = writes + reads + uncached (excludes output)."""
+        return self.write_usd + self.read_usd + self.uncached_usd
 
     @property
     def total_usd(self) -> float:
-        return self.write_usd + self.read_usd + self.output_usd
+        return self.write_usd + self.read_usd + self.uncached_usd + self.output_usd
+
+    @property
+    def cache_hit_rate(self) -> float:
+        """Read share of total input work, in [0,1]."""
+        denom = self.cache_read_tok + self.cache_write_tok + self.uncached_input_tok
+        return self.cache_read_tok / denom if denom else 0.0
 
 
 def rates_for(model_id: str,
@@ -108,9 +160,10 @@ def cache_frame_cost(
     Mirrors g200_artifacts.cache_price(): growth = write, prior prefix = read,
     output flat; shrink ("tail transient") handled without mis-billing.
     """
-    pw = rates["cache_write"] / 1e6
-    pr = rates["cache_read"] / 1e6
-    po = rates["output"] / 1e6
+    pw = _rate(rates, "cache_write") / 1e6
+    pr = _rate(rates, "cache_read") / 1e6
+    po = _rate(rates, "output") / 1e6
+    pin = _rate(rates, "input") / 1e6
 
     prompts = list(prompt_tokens)
     comps = list(completion_tokens)
@@ -133,6 +186,11 @@ def cache_frame_cost(
             r_tok += common
         prev_p = p
 
+    # list-frame upper bound: ALL input (= the final prompt's full token count,
+    # i.e. the sum of writes+reads inferred above is the total billable input) at
+    # the base input rate, output flat. On the inferred path total input work is
+    # w_tok + r_tok.
+    list_usd = (w_tok + r_tok) * pin + o_tok * po
     return CostBreakdown(
         write_usd=w_tok * pw,
         read_usd=r_tok * pr,
@@ -140,12 +198,119 @@ def cache_frame_cost(
         cache_write_tok=w_tok,
         cache_read_tok=r_tok,
         output_tok=o_tok,
+        uncached_usd=0.0,
+        uncached_input_tok=0,
+        list_usd=list_usd,
     )
 
 
-def flat_cost(input_tokens: int, output_tokens: int, rates: dict[str, float]) -> float:
-    """Simple list-price bill (no caching): input at cache_write, output flat.
+def real_cache_cost(
+    usage: Iterable[dict],
+    rates: dict[str, float],
+) -> CostBreakdown:
+    """Price a run from the REAL per-call cache fields the provider reported.
 
-    The pessimistic upper bound to report alongside the cache-aware figure.
+    This is the PREFERRED path: no inference. Each usage dict is one assistant
+    call (in call order) and is expected to carry, in addition to prompt/
+    completion tokens, the cache split:
+
+        cache_creation_input_tokens  -> billed at cache_write
+        cache_read_input_tokens      -> billed at cache_read
+        (OpenAI-style usage.prompt_tokens_details.cached_tokens is normalized to
+         cache_read_input_tokens upstream by the runner)
+
+    The remaining input on each call — prompt_tokens − write − read — is the
+    genuinely-uncached new input and is billed at the base input rate. Output is
+    flat. (prompt_tokens is the FULL billable input the model saw: uncached new
+    + cache-write + cache-read, so the three buckets partition it.)
+
+    Returns a CostBreakdown with the three input buckets, the output bucket, the
+    list-frame upper bound, and a derivable cache_hit_rate.
     """
-    return input_tokens / 1e6 * rates["cache_write"] + output_tokens / 1e6 * rates["output"]
+    pw = _rate(rates, "cache_write") / 1e6
+    pr = _rate(rates, "cache_read") / 1e6
+    po = _rate(rates, "output") / 1e6
+    pin = _rate(rates, "input") / 1e6
+
+    w_tok = r_tok = u_tok = o_tok = 0
+    total_input = 0
+    for u in usage:
+        pt = int(u.get("prompt_tokens", 0) or 0)
+        ct = int(u.get("completion_tokens", 0) or 0)
+        cw = int(u.get("cache_creation_input_tokens", 0) or 0)
+        crd = int(u.get("cache_read_input_tokens", 0) or 0)
+        # the uncached remainder; clamp at 0 so a noisy/over-counted split never
+        # produces a negative bucket.
+        unc = max(0, pt - cw - crd)
+        w_tok += cw
+        r_tok += crd
+        u_tok += unc
+        o_tok += ct
+        total_input += pt
+
+    return CostBreakdown(
+        write_usd=w_tok * pw,
+        read_usd=r_tok * pr,
+        output_usd=o_tok * po,
+        cache_write_tok=w_tok,
+        cache_read_tok=r_tok,
+        output_tok=o_tok,
+        uncached_usd=u_tok * pin,
+        uncached_input_tok=u_tok,
+        # list-frame: every input token (the full prompt sum) at the base input rate
+        list_usd=total_input * pin + o_tok * po,
+    )
+
+
+def has_real_cache_fields(usage: Iterable[dict]) -> bool:
+    """True if ANY call in the series carries a real cache field.
+
+    The signal to prefer real_cache_cost() over the inferred-growth fallback.
+    A run where the provider reported zero cache activity (all-cold) still counts
+    as "real" only if the keys are present; an empty/absent series does not.
+    """
+    for u in usage:
+        if ("cache_creation_input_tokens" in u) or ("cache_read_input_tokens" in u):
+            return True
+    return False
+
+
+def price_run(usage: Iterable[dict], rates: dict[str, float]) -> CostBreakdown:
+    """Price a run, preferring the REAL cache fields and falling back to inference.
+
+    The single entry point the runner/report should call: if the provider
+    reported the cache split on the usage series we price it exactly
+    (real_cache_cost); otherwise we reconstruct it from prompt growth
+    (cache_frame_cost). Either way the returned CostBreakdown carries the cache
+    token split, the dollar buckets, and the list-frame bound.
+    """
+    series = list(usage)
+    if has_real_cache_fields(series):
+        return real_cache_cost(series, rates)
+    return cache_frame_cost(
+        [int(u.get("prompt_tokens", 0) or 0) for u in series],
+        [int(u.get("completion_tokens", 0) or 0) for u in series],
+        rates,
+    )
+
+
+def list_frame_cost(input_tokens: int, output_tokens: int,
+                    rates: dict[str, float]) -> float:
+    """List-frame UPPER BOUND $: every input token at the base input rate + output flat.
+
+    The "what a non-caching bill would be" ceiling reported alongside the
+    cache-aware figure. Uses the base `input` rate (falling back to cache_write
+    for 3-key rate dicts).
+    """
+    return input_tokens / 1e6 * _rate(rates, "input") \
+        + output_tokens / 1e6 * _rate(rates, "output")
+
+
+def flat_cost(input_tokens: int, output_tokens: int, rates: dict[str, float]) -> float:
+    """Back-compat alias retained for figures.py: list-price bill (no caching).
+
+    Historically priced input at cache_write; now routed through
+    list_frame_cost so input uses the base `input` rate when present (it still
+    falls back to cache_write for 3-key rate dicts, preserving old behavior).
+    """
+    return list_frame_cost(input_tokens, output_tokens, rates)

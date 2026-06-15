@@ -171,24 +171,52 @@ def rank_table(ranking: Ranking) -> str:
     return "\n".join(lines)
 
 
+def _fmt_tok(v: float) -> str:
+    return f"{v/1e6:.2f}M"
+
+
+def _fmt_pct_delta(v: float) -> str:
+    """Savings %: positive = cheaper than baseline. 0.0 (the baseline row) -> —."""
+    if abs(v) < 1e-9:
+        return "—"
+    return f"{v:+.0f}%"
+
+
 def metrics_table(aggs: Sequence[AggResult],
                   hero: str = HERO_DEFAULT) -> str:
-    """The full per-arm metric matrix (sorted cheapest $/solved first)."""
+    """The FULL per-arm KPI matrix (sorted cheapest $/solved first).
+
+    Columns: success, $/solved, $/task (mean cache-aware), input & output tokens,
+    cache write/read tokens, cache hit rate, savings %s vs baseline (input /
+    output / cost), limit-death rate, mean steps, mean wall, mean time-to-submit.
+    Every number is the real computed AggResult value (savings %s are filled by
+    the report against the baseline arm)."""
     rows = sorted(aggs, key=lambda a: a.cost_per_solved_usd)
     hero_l = hero.lower()
     lines = [
-        "| arm | n | solved | success | input tok | output tok | "
-        "cache $ | list $ | $/solved | mean calls | mean wall |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| arm | n | success | $/solved | $/task | cache $ | list $ | "
+        "input tok | output tok | cache W | cache R | hit % | "
+        "in save | out save | $ save | limit-death | mean steps | "
+        "mean wall | time→submit |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "---:|---:|---:|---:|---:|---:|---:|",
     ]
     for a in rows:
         name = f"**{a.arm}**" if a.arm.lower() == hero_l else a.arm
+        per_task = a.cost_usd / a.n if a.n else 0.0
         lines.append(
-            f"| {name} | {a.n} | {a.n_success} | {100*a.success_rate:.0f}% | "
-            f"{a.input_tokens/1e6:.2f}M | {a.output_tokens/1e6:.2f}M | "
+            f"| {name} | {a.n_success}/{a.n} | {100*a.success_rate:.0f}% | "
+            f"{_fmt_usd(a.cost_per_solved_usd)} | {_fmt_usd(per_task)} | "
             f"{_fmt_usd(a.cost_usd)} | {_fmt_usd(a.cost_usd_flat)} | "
-            f"{_fmt_usd(a.cost_per_solved_usd)} | {a.mean_calls:.1f} | "
-            f"{a.mean_wall_s:.0f}s |")
+            f"{_fmt_tok(a.input_tokens)} | {_fmt_tok(a.output_tokens)} | "
+            f"{_fmt_tok(a.cache_write_tok)} | {_fmt_tok(a.cache_read_tok)} | "
+            f"{100*a.cache_hit_rate:.0f}% | "
+            f"{_fmt_pct_delta(a.input_saving_pct)} | "
+            f"{_fmt_pct_delta(a.output_saving_pct)} | "
+            f"{_fmt_pct_delta(a.cost_saving_pct)} | "
+            f"{100*a.limit_death_rate:.0f}% | {a.mean_steps:.1f} | "
+            f"{a.mean_wall_s:.0f}s | "
+            f"{a.mean_time_to_submit_s:.0f}s |")
     return "\n".join(lines)
 
 
@@ -215,6 +243,8 @@ def _figure_block(fig_paths: dict[str, list[Path]], results_dir: Path,
     order = [
         ("leaderboard", "Leaderboard"),
         ("cost_per_solved", "Cost per solved task"),
+        ("cache_hit_rate", "Cache hit rate"),
+        ("reliability", "Reliability: latency & limit-death"),
         ("success_vs_cost", "Success rate vs cost"),
         ("tokens_saved", "Input tokens saved vs baseline"),
         ("cost_distribution", "Per-run cost distribution"),
@@ -263,9 +293,13 @@ def build_markdown(aggs: Sequence[AggResult], ranking: Ranking,
         "",
         metrics_table(aggs, hero=hero),
         "",
-        "Cache $ is the cache-aware bill (writes + reads + output); list $ is the "
-        "no-cache list-price upper bound. $/solved divides cache $ by tasks "
-        "solved.",
+        "Cache $ is the cache-aware bill (uncached input + cache writes + cache "
+        "reads + output); list $ is the no-cache list-price upper bound. $/solved "
+        "divides cache $ by tasks solved; $/task divides it by all runs. Hit % is "
+        "the token-weighted cache-read share of input work. Savings %s are vs the "
+        "baseline arm (positive = cheaper); — marks the baseline row. Limit-death "
+        "is the share of runs that hit a cap without submitting. All measured "
+        "uniformly from the model-API usage series across every arm.",
         "</details>",
         "",
         "## Figures",
@@ -294,12 +328,14 @@ def inject_readme(readme_path: str | Path, block: str) -> bool:
 def build_report(records: Sequence[RunRecord] | str | Path,
                  results_dir: str | Path = "results",
                  *, hero: str = HERO_DEFAULT, model_id: str = "",
+                 baseline_arm: str = "baseline",
                  readme_path: Optional[str | Path] = None,
                  render_figures: bool = True) -> dict:
-    """End-to-end: aggregate -> choose ranking -> render figures -> write
-    markdown + (optional) inject into README.
+    """End-to-end: aggregate -> fill vs-baseline savings -> choose ranking ->
+    render figures -> write markdown + (optional) inject into README.
 
     `records` may be a list of RunRecords or a path to a JSONL ledger.
+    `baseline_arm` is the reference arm for the input/output/cost savings %s.
     Returns a dict with the chosen ordering label, ranked arm names, figure
     paths, and the markdown written to <results>/REPORT.md.
     """
@@ -310,6 +346,7 @@ def build_report(records: Sequence[RunRecord] | str | Path,
     records = list(records)
 
     aggs = figures.aggregate(records, model_id=model_id)
+    figures.fill_savings(aggs, baseline_arm=baseline_arm)
     ranking = choose_ranking(aggs, hero=hero)
 
     results_dir = Path(results_dir)
@@ -353,10 +390,12 @@ if __name__ == "__main__":  # pragma: no cover
     ap.add_argument("ledger", help="path to the JSONL run ledger")
     ap.add_argument("--results", default="results", help="results dir (figures + REPORT.md)")
     ap.add_argument("--hero", default=HERO_DEFAULT, help="arm to surface (#1 if possible)")
+    ap.add_argument("--baseline", default="baseline", help="reference arm for savings %s")
     ap.add_argument("--model", default="", help="model id hint for re-pricing")
     ap.add_argument("--readme", default=None, help="README to inject the block into")
     ap.add_argument("--no-figures", action="store_true", help="skip figure rendering")
     a = ap.parse_args()
     res = build_report(a.ledger, a.results, hero=a.hero, model_id=a.model,
+                       baseline_arm=a.baseline,
                        readme_path=a.readme, render_figures=not a.no_figures)
     print(json.dumps(res, indent=2))
