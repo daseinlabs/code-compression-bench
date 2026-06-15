@@ -2,8 +2,10 @@
 # Every arm runs the SAME model (OPENAI_BASE_URL / OPENAI_API_KEY / MODEL from .env).
 # Copy .env.example -> .env and fill in before running.
 
-PY ?= python
-ARMS ?= baseline,bear,edgee,rtk,headroom,dasein,woz
+PY ?= python3
+# baseline (A0) is the measured control savings are computed against — always include it.
+# bear is no-op (sales-gated) so it's omitted; the runner also skips any unready arm.
+ARMS ?= baseline,dasein,woz,edgee,rtk,headroom,compresr
 TASKS ?= tasks_bloated50.json
 WORKERS ?= 8
 
