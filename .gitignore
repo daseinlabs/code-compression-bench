@@ -1,0 +1,25 @@
+# Secrets — never commit real keys
+.env
+.env.*
+!.env.example
+*.key
+*-key.json
+*credentials*.json
+service-account*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Run artifacts (raw); curated results/figures are committed under results/
+runs/
+traj/
+*.log
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
