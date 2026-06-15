@@ -7,7 +7,9 @@ just routes litellm at the local gateway; see selfhost/docker-compose.yml and
 arms/README.md for how to launch it.
 
 Env:
-  EDGEE_BASE_URL  — base URL of the local Edgee proxy (default http://127.0.0.1:8801).
+  EDGEE_BASE_URL  — base URL of the Edgee gateway (hosted endpoint, or local
+                    proxy default http://127.0.0.1:8801).
+  EDGEE_API_KEY   — optional sk-edgee key for the HOSTED gateway (omit for self-host).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ class EdgeeArm(ProxyArm):
         return os.environ.get("EDGEE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
     def headers(self) -> dict[str, str]:
-        # Self-hosted proxy authenticates upstream with its own configured
-        # OPENAI_API_KEY (see docker-compose); the client needs no auth header.
-        return {}
+        # Hosted Edgee gateway: authenticate with the sk-edgee key. Self-host:
+        # omit EDGEE_API_KEY and the local proxy holds the upstream key itself.
+        key = os.environ.get("EDGEE_API_KEY", "")
+        return {"Authorization": f"Bearer {key}"} if key else {}

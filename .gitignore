@@ -6,6 +6,10 @@
 *-key.json
 *credentials*.json
 service-account*.json
+api_key_dump.txt
+*key*dump*
+*_keys.txt
+*secrets*.txt
 
 # Python
 __pycache__/

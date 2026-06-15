@@ -47,6 +47,15 @@ class BearArm(TransformArm):
     name = "bear"
     needs = ["BEAR_API_KEY", "BEAR_BASE_URL"]
 
+    def ready(self) -> tuple[bool, str]:
+        """bear-1.2 (The Token Company) is gated behind a sales call — there is no
+        self-serve API key — so it is NO-OP'd and excluded from runs by default.
+        Set BEAR_ENABLED=1 (plus BEAR_API_KEY/BEAR_BASE_URL) to opt back in once
+        access is granted; the transform below is already wired for that day."""
+        if os.environ.get("BEAR_ENABLED", "0") != "1":
+            return (False, "no-op: bear-1.2 is sales-gated (no self-serve API); excluded from runs")
+        return super().ready()
+
     def transform(self, messages: Messages) -> Messages:
         """Compress the message array via the bear API; fall back to the input
         unchanged on any error so a transient API hiccup never silently drops a
