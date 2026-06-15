@@ -1,34 +1,43 @@
-"""The benchmark runner: one fixed coding-agent scaffold, swappable compression arm.
+"""The benchmark runner: the REAL mini-swe-agent scaffold, swappable compression arm.
 
-This is a standalone (open-swe-lite / mini-swe-agent style) SWE-bench driver. The
-agent loop is deliberately tiny and FIXED across every arm: a system prompt, a
-single ``bash`` tool the model drives, and a step loop that executes commands in
-the instance's canonical Docker container until the model submits a patch (or a
-cap trips). Every arm runs the SAME ``MODEL`` against the SAME OpenAI-compatible
-endpoint (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``). The ONLY thing that varies
-between arms is HOW the prompt is compressed at the model-call seam:
+This driver runs the open-source ``minisweagent`` package — the EXACT scaffold
+our internal v5 eval uses — so the bench is byte-identical to v5 and baseline
+(A0) / Dasein (A3S) rows are directly portable from the v5 run. We build the
+same ``LitellmModel`` (Vertex ``model_kwargs``, ``set_cache_control``) + the
+``minisweagent.agents.default.DefaultAgent`` + the swebench env via
+``minisweagent.run.benchmarks.swebench.get_sb_environment``, mirroring
+``adaptive_context/eval/mini_swe.py`` — WITHOUT importing any proprietary code.
 
-    TransformArm  -> we call ``arm.transform(messages)`` and send the rewritten
-                     array to the normal endpoint (client-side compression).
-    ProxyArm      -> we point the litellm call at ``arm.model_base_url()`` and
-                     merge ``arm.headers()`` (the arm compresses server-side).
-    ToolArm       -> we fold ``arm.attach()`` tools (and, TODO, an MCP server)
-                     into the scaffold's tool set.
+Clean-room rule: this public repo must NOT import ``adaptive_context`` (our
+curator/governor IP). ``minisweagent`` is open-source and IS used directly. The
+Dasein compression happens server-side behind the dasein ProxyArm; the bench
+never needs the curator code.
+
+The ONLY thing that varies between arms is HOW the prompt is compressed at the
+model-call seam — installed at the SAME point ``scripts/ab_curator.py`` uses:
+we wrap ``model.query`` so every call routes ``messages -> arm -> orig(messages)``
+AND records a CallUsage row off the litellm response the model produced.
+
+    TransformArm  -> arm.transform(messages); the rewritten array is sent to the
+                     normal endpoint (client-side compression).
+    ProxyArm      -> swap the litellm ``api_base`` + merge ``headers()`` (server-side).
+    ToolArm       -> fold ``attach().tools`` into the model's tool set (MCP spawn
+                     stays a documented TODO).
     BaselineArm   -> the control: messages and endpoint pass through unchanged.
 
 Scale-out: a ``ProcessPoolExecutor`` fans the full (instance x arm) grid across
 ``--workers`` processes. A JSONL ledger makes the run resumable — a completed
 (instance, arm) pair is skipped on restart; infra failures are retried once and
 never counted. Per-(task, arm) there are hard 50-call and wall-clock caps so a
-runaway agent can't burn the budget.
+runaway agent can't burn the budget (mapped onto the agent's step/cost limits +
+a wall watchdog at the seam).
 
 Each finished solve is graded by the official SWE-bench Docker harness
 (:mod:`bench.grader`), priced cache-aware (:mod:`bench.pricing`), and written as a
 :class:`bench.schema.RunRecord`.
 
-Reimplemented from the PATTERNS in meta_learning (gate2.py worker pool / resume
-ledger / caps; mini_swe.py litellm call + bash tool + per-call usage capture;
-swebench.py grading) as standalone clean-room code. No proprietary import.
+Heavy imports (``minisweagent``, ``litellm``) are LAZY so ``--list-arms`` and
+``import bench.runner`` work on a box where neither is installed.
 """
 
 from __future__ import annotations
@@ -55,42 +64,15 @@ DEFAULT_WORKERS = 8
 CALL_CAP = 50                 # max model calls per (task, arm) — matches the gate2 cap
 WALL_CAP_S = 50 * 60          # hard wall-clock watchdog per solve
 DEFAULT_MAX_TOKENS = 8000     # completion cap per call
-PATCH_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"  # how the agent signals "done"
+# Vertex project mirrors the v5 eval default (adaptive_context/eval/mini_swe.py).
+VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "dasein-473321")
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
 
 
-# ── system prompt for the fixed scaffold ─────────────────────────────────────
-SYSTEM_PROMPT = """You are a coding agent fixing a bug in a Python repository.
-
-You are at the repository root inside a Linux shell. Investigate the codebase,
-locate the defect described in the task, and edit the source so the project's
-tests pass. You act ONLY through the `bash` tool — one shell command per call.
-
-Guidelines:
-- Explore with standard tools (ls, cat, grep/rg, sed, python). Read before you edit.
-- Apply edits in place (e.g. with `python - <<'PY' ... PY`, sed, or a heredoc to a file).
-- Do NOT modify the test files; fix the source.
-- When the fix is complete, run exactly:  echo {sentinel}
-  on its own, and the harness will collect your diff against the base commit.
-""".format(sentinel=PATCH_SENTINEL)
-
-BASH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "bash",
-        "description": (
-            "Run a single shell command at the repository root and return its "
-            "combined stdout/stderr. Use this for everything: reading files, "
-            "searching, editing, running tests."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to run."}
-            },
-            "required": ["command"],
-        },
-    },
-}
+# ── the core scaffold tool (mirrors minisweagent's BASH_TOOL) ────────────────
+# We import the package's own BASH_TOOL lazily inside the run path; ToolArm
+# extras are folded into the model's tool set there. (SEARCH_TOOL is dropped:
+# it needs the proprietary repo index, so the bench uses BASH only — the core.)
 
 
 # ── task set loading ─────────────────────────────────────────────────────────
@@ -108,150 +90,7 @@ def load_tasks(path: str) -> list[str]:
     raise ValueError(f"unrecognized task file shape: {type(data)}")
 
 
-# ── docker execution environment (canonical swebench instance image) ─────────
-class DockerEnv:
-    """A throwaway container started from the instance's canonical SWE-bench image.
-
-    The agent's bash commands exec inside it; on teardown the patch is captured
-    as ``git diff`` against the base commit. Mirrors what mini-swe-agent's
-    ``get_sb_environment`` does, reimplemented over the docker CLI so the public
-    repo carries no proprietary harness code.
-    """
-
-    # the official image naming the swebench harness builds/pulls
-    IMAGE_FMT = "swebench/sweb.eval.x86_64.{key}:latest"
-
-    def __init__(self, instance_id: str, repo_dir: str = "/testbed", timeout_s: int = 120):
-        self.instance_id = instance_id
-        self.repo_dir = repo_dir
-        self.timeout_s = timeout_s
-        self.container: Optional[str] = None
-
-    @classmethod
-    def image_for(cls, instance_id: str) -> str:
-        # swebench munges the instance id for the image tag: lowercased, '__' -> '_1776_'.
-        key = instance_id.lower().replace("__", "_1776_")
-        return cls.IMAGE_FMT.format(key=key)
-
-    def start(self) -> None:
-        import subprocess
-        name = f"ccb_{self.instance_id.replace('__', '_')}_{os.getpid()}_{int(time.time())}"
-        image = self.image_for(self.instance_id)
-        subprocess.run(
-            ["docker", "run", "-d", "--name", name, "-w", self.repo_dir, image,
-             "sleep", "infinity"],
-            check=True, capture_output=True, text=True, timeout=300,
-        )
-        self.container = name
-        # stash the pristine commit so we can diff at the end regardless of what the agent does.
-        self.exec("git config --global --add safe.directory '*' || true")
-
-    def exec(self, command: str) -> str:
-        import subprocess
-        if not self.container:
-            raise RuntimeError("DockerEnv not started")
-        try:
-            proc = subprocess.run(
-                ["docker", "exec", self.container, "bash", "-lc", command],
-                capture_output=True, text=True, timeout=self.timeout_s,
-            )
-        except subprocess.TimeoutExpired:
-            return f"[command timed out after {self.timeout_s}s]"
-        out = (proc.stdout or "") + (proc.stderr or "")
-        return out
-
-    def get_patch(self) -> str:
-        """The agent's work as a unified diff against the base commit (excludes tests)."""
-        # add untracked source files so brand-new files show up in the diff, then diff.
-        self.exec("git add -A >/dev/null 2>&1 || true")
-        return self.exec("git diff --cached HEAD 2>/dev/null || git diff HEAD 2>/dev/null")
-
-    def cleanup(self) -> None:
-        import subprocess
-        if self.container:
-            try:
-                subprocess.run(["docker", "rm", "-f", self.container],
-                               capture_output=True, timeout=60)
-            except Exception:
-                pass
-            self.container = None
-
-
-# ── the model-call seam (where the arm is installed) ─────────────────────────
-def _call_model(arm, messages, tools, *, model, max_tokens, usage_sink):
-    """One model call with the selected arm wired at the seam.
-
-    - TransformArm / Baseline: rewrite ``messages`` client-side, hit the normal endpoint.
-    - ProxyArm:                point base_url + headers at the arm's endpoint.
-    - ToolArm:                 endpoint normal; tool wiring already folded in by the caller.
-
-    Records per-call (prompt_tokens, completion_tokens) into ``usage_sink``.
-    """
-    import litellm
-
-    base_url = os.environ.get("OPENAI_BASE_URL") or None
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY")
-    headers: dict[str, str] = {}
-    call_messages = messages
-
-    if arm.kind in (ArmKind.TRANSFORM, ArmKind.BASELINE):
-        # arm rewrites the array; baseline returns it unchanged.
-        call_messages = arm.transform(messages)  # type: ignore[attr-defined]
-    elif arm.kind == ArmKind.PROXY:
-        base_url = arm.model_base_url()           # type: ignore[attr-defined]
-        headers = {**headers, **(arm.headers() or {})}  # type: ignore[attr-defined]
-    # ToolArm: tools already merged upstream; nothing to change on the call itself.
-
-    kwargs: dict = {
-        "model": model,
-        "messages": call_messages,
-        "tools": tools,
-        "max_tokens": max_tokens,
-        "temperature": 0.0,
-    }
-    if base_url:
-        kwargs["api_base"] = base_url
-    if api_key:
-        kwargs["api_key"] = api_key
-    if headers:
-        kwargs["extra_headers"] = headers
-
-    t_call = time.time()
-    resp = litellm.completion(**kwargs)
-    latency_s = round(time.time() - t_call, 3)
-    usage_sink.append(_extract_call_usage(resp, latency_s))
-    return resp
-
-
-# transient errors that warrant an in-run retry (rate limit / timeout / 5xx).
-_RETRYABLE = ("RateLimit", "Timeout", "APIConnection", "ServiceUnavailable",
-              "InternalServer", "Overloaded", "APIError")
-
-
-def _call_model_with_retry(arm, messages, tools, *, model, max_tokens, usage_sink,
-                           max_retries: int = 2):
-    """`_call_model` with a small bounded retry on TRANSIENT model-call errors.
-
-    Returns ``(resp, retries)`` where ``retries`` is how many times this call had
-    to be re-issued before it succeeded (0 on first try). A retried call appends
-    exactly ONE usage row (the successful attempt). Persistent failures bubble up
-    as the original exception so the worker counts them as an infra failure.
-    """
-    attempt = 0
-    while True:
-        try:
-            resp = _call_model(arm, messages, tools, model=model,
-                               max_tokens=max_tokens, usage_sink=usage_sink)
-            return resp, attempt
-        except Exception as e:  # noqa: BLE001
-            name = type(e).__name__
-            transient = any(tok in name for tok in _RETRYABLE)
-            if not transient or attempt >= max_retries:
-                raise
-            attempt += 1
-            time.sleep(min(2 ** attempt, 8))  # brief backoff before the retry
-
-
+# ── usage extraction (unchanged — REAL cache fields + normalization) ─────────
 def _usage_get(usage, key: str) -> int:
     """Read an int field off a litellm usage object whether it's attr- or dict-shaped."""
     v = getattr(usage, key, None)
@@ -260,11 +99,12 @@ def _usage_get(usage, key: str) -> int:
     return int(v or 0)
 
 
-def _extract_call_usage(resp, latency_s: float) -> dict:
-    """One CallUsage dict from a litellm response: tokens + REAL cache split + latency.
+def _extract_call_usage(usage, latency_s: float) -> dict:
+    """One CallUsage dict from a litellm usage object: tokens + REAL cache split + latency.
 
-    Reads the cache split straight from the provider usage object so pricing uses
-    the real bill (no inference) whenever it's reported:
+    ``usage`` is the litellm response's ``usage`` (attr- or dict-shaped); the
+    real scaffold surfaces it on the message it returns (``extra.response.usage``),
+    so we read it straight off the response the model produced — no inference.
       - cache_creation_input_tokens : the cache WRITE (Anthropic/litellm)
       - cache_read_input_tokens     : the cache READ (Anthropic/litellm); also
                                       accept the OpenAI shape
@@ -273,7 +113,6 @@ def _extract_call_usage(resp, latency_s: float) -> dict:
     signal pricing uses to choose the real-cache path over the inferred-growth
     fallback); absent fields are simply omitted.
     """
-    usage = getattr(resp, "usage", None)
     pt = _usage_get(usage, "prompt_tokens")
     ct = _usage_get(usage, "completion_tokens")
     out: dict = {"prompt_tokens": pt, "completion_tokens": ct, "latency_s": latency_s}
@@ -307,7 +146,6 @@ def _extract_call_usage(resp, latency_s: float) -> dict:
     # cache_creation/cache_read as SEPARATE top-level fields, so fold them back in.
     # OpenAI reports prompt_tokens INCLUSIVE of cached_tokens (no cache_creation
     # field in that shape), so it's already full and we leave it.
-    # (Validate against one real Vertex/Anthropic response at smoke — see TODO.)
     if "cache_creation_input_tokens" in out:  # Anthropic shape => prompt excludes cache
         out["prompt_tokens"] = (
             pt
@@ -318,153 +156,283 @@ def _extract_call_usage(resp, latency_s: float) -> dict:
     return out
 
 
-# ── the fixed agent loop ──────────────────────────────────────────────────────
+# transient errors that warrant an in-run retry (rate limit / timeout / 5xx).
+_RETRYABLE = ("RateLimit", "Timeout", "APIConnection", "ServiceUnavailable",
+              "InternalServer", "Overloaded", "APIError")
+
+
+# ── arm seam state (collected per run, read back into the RunRecord) ─────────
+class _SeamState:
+    """Mutable holder the wrapped ``model.query`` writes into during one solve.
+
+    Lives in the worker process for the duration of one (instance, arm) solve.
+    The wrapped query appends one CallUsage row per model call, counts retries,
+    and flips ``degraded`` if a transform arm reports a fallback.
+    """
+
+    def __init__(self) -> None:
+        self.usage: list[dict] = []
+        self.retries: int = 0
+        self.degraded: bool = False
+        self.t0: float = time.time()
+        self.wall_cap_s: float = float(WALL_CAP_S)
+
+
+class _WallCapExceeded(Exception):
+    """Raised inside the wrapped query to abort a run that blew its wall budget."""
+
+
+def _install_arm_seam(model, arm, seam: _SeamState, max_retries: int = 2):
+    """Wrap ``model.query`` at the SAME point scripts/ab_curator.py installs.
+
+    Every model call routes ``messages -> arm transform -> orig(messages)`` and
+    records a CallUsage row off the litellm response the model produced. This is
+    the one seam where the arm is consulted (plus tool-set wiring for ToolArm,
+    done by the caller before the agent runs).
+
+      - TransformArm / Baseline : rewrite the message list client-side, then call
+                                  the real query unchanged.
+      - ProxyArm                : api_base + headers are merged into the model's
+                                  model_kwargs by the caller (so the underlying
+                                  litellm.completion routes through the arm
+                                  endpoint); query just records usage.
+      - ToolArm                 : tools already folded into the model; query just
+                                  records usage.
+    """
+    orig = model.query
+
+    is_transform = arm.kind in (ArmKind.TRANSFORM, ArmKind.BASELINE)
+
+    def wrapped(messages, **kw):
+        # wall-clock watchdog: the agent's own loop has no wall cap, so we trip
+        # one at the seam (every call passes through here).
+        if time.time() - seam.t0 > seam.wall_cap_s:
+            raise _WallCapExceeded(f"wall cap {seam.wall_cap_s:.0f}s exceeded")
+
+        call_messages = messages
+        if is_transform:
+            # arm rewrites the array; baseline returns it unchanged.
+            call_messages = arm.transform(messages)  # type: ignore[attr-defined]
+            if getattr(arm, "last_degraded", False):
+                seam.degraded = True
+
+        attempt = 0
+        while True:
+            t_call = time.time()
+            try:
+                msg = orig(call_messages, **kw)
+            except Exception as e:  # noqa: BLE001
+                name = type(e).__name__
+                transient = any(tok in name for tok in _RETRYABLE)
+                if not transient or attempt >= max_retries:
+                    raise
+                attempt += 1
+                seam.retries += 1
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            latency_s = round(time.time() - t_call, 3)
+            # the real scaffold surfaces the litellm response on the returned
+            # message at extra.response (mirrors AdaptiveAgent.query reading
+            # msg["extra"]["response"]["usage"]).
+            resp = (msg.get("extra", {}) or {}).get("response", {}) or {}
+            usage = resp.get("usage") if isinstance(resp, dict) else getattr(resp, "usage", None)
+            seam.usage.append(_extract_call_usage(usage, latency_s))
+            return msg
+
+    model.query = wrapped
+
+
+def _make_model(model_name: str, arm, *, max_tokens: int):
+    """Build the v5 LitellmModel (Vertex model_kwargs, cache_control), mirroring
+    adaptive_context/eval/mini_swe.py::make_model — minus the proprietary
+    AdaptiveLitellmModel/SEARCH_TOOL. The bench advertises ONLY the core BASH_TOOL.
+
+    For a ToolArm, the arm's extra tools are folded into the model's advertised
+    tool set by subclassing the model's ``_query`` (the same hook mini_swe.py
+    uses to add SEARCH_TOOL). For a ProxyArm, api_base + headers are merged into
+    ``model_kwargs`` so the underlying ``litellm.completion`` routes through the
+    arm endpoint.
+    """
+    import litellm  # lazy
+    from minisweagent.models.litellm_model import LitellmModel  # lazy
+    from minisweagent.models.utils.actions_toolcall import BASH_TOOL  # lazy
+
+    name_l = model_name.lower()
+    # Claude: explicit cache_control (no min). Gemini: implicit caching (no
+    # cache_control). Mirrors mui_swe.py make_model.
+    cache = "default_end" if "claude" in name_l else None
+    mk = {"max_tokens": max_tokens, "temperature": 0.0}
+    # Vertex routing only when the model id is a vertex model (keeps OpenAI-
+    # compatible / proxied calls clean).
+    if "vertex" in name_l or model_name.startswith("vertex_ai/"):
+        mk["vertex_project"] = VERTEX_PROJECT
+        mk["vertex_location"] = VERTEX_LOCATION
+    if "claude" not in name_l and ("gemini" in name_l or "vertex" in name_l):
+        # reasoning_effort is a Gemini-3 param, not Claude (see mini_swe.py).
+        mk["reasoning_effort"] = "low"
+
+    # ProxyArm: route the underlying litellm call through the arm endpoint by
+    # merging api_base + extra_headers into model_kwargs (LitellmModel._query
+    # does litellm.completion(..., **(model_kwargs | kwargs))).
+    extra_tools: list[dict] = []
+    if arm.kind == ArmKind.PROXY:
+        base = arm.model_base_url()  # type: ignore[attr-defined]
+        if base:
+            mk["api_base"] = base
+        hdrs = arm.headers() or {}  # type: ignore[attr-defined]
+        if hdrs:
+            mk["extra_headers"] = hdrs
+    elif arm.kind == ArmKind.TOOL:
+        attach = arm.attach()  # type: ignore[attr-defined]
+        extra_tools = list(attach.tools or [])
+        # TODO(woz): spawn attach.mcp_server_cmd as a stdio MCP server and bridge
+        # its tools in here; tear it down after the run. Stubbed until the woz
+        # server command lands (documented seam, same as the prior runner).
+
+    if extra_tools:
+        # Fold the arm's tools into the model's advertised tool set the same way
+        # mini_swe.py's AdaptiveLitellmModel adds SEARCH_TOOL: override _query.
+        tools = [BASH_TOOL] + extra_tools
+
+        class _ToolLitellmModel(LitellmModel):
+            def _query(self, messages, **kwargs):
+                return litellm.completion(
+                    model=self.config.model_name, messages=messages,
+                    tools=tools, **(self.config.model_kwargs | kwargs))
+
+        return _ToolLitellmModel(model_name=model_name, set_cache_control=cache, model_kwargs=mk)
+
+    return LitellmModel(model_name=model_name, set_cache_control=cache, model_kwargs=mk)
+
+
+def _load_swebench_config() -> dict:
+    """The package's own swebench.yaml — same config mini_swe.py loads."""
+    import yaml  # lazy
+    import minisweagent.config as cfg  # lazy
+    return yaml.safe_load(
+        (Path(cfg.__file__).parent / "benchmarks" / "swebench.yaml").read_text())
+
+
+def _fetch_instance(instance_id: str, dataset: str, split: str) -> dict:
+    """Resolve the SWE-bench instance dict get_sb_environment needs.
+
+    Uses the HuggingFace ``datasets`` loader the swebench harness ships with;
+    falls back to a minimal dict carrying just the instance_id if the dataset is
+    unavailable (get_sb_environment keys the image off instance_id).
+    """
+    try:
+        from datasets import load_dataset  # lazy
+        ds = load_dataset(dataset, split=split)
+        for row in ds:
+            if row.get("instance_id") == instance_id:
+                return dict(row)
+    except Exception:
+        pass
+    return {"instance_id": instance_id}
+
+
+# ── the fixed agent loop (now the REAL minisweagent.DefaultAgent) ─────────────
 def run_agent(
     arm,
     instance_id: str,
     *,
     model: str,
+    dataset: str,
+    split: str,
     call_cap: int = CALL_CAP,
     wall_cap_s: int = WALL_CAP_S,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     exec_timeout_s: int = 120,
 ) -> dict:
-    """Drive one (instance, arm) solve. Returns a dict of raw run signals.
+    """Drive one (instance, arm) solve with the real minisweagent scaffold.
 
-    Pure scaffold logic; the arm is consulted only at the model-call seam and
-    (for ToolArm) at tool-assembly time. No grading here — the caller grades the
-    returned patch.
+    Builds the v5 model + DefaultAgent + swebench env (mirroring mini_swe.py),
+    installs the arm at the model.query seam, runs the agent, and returns a dict
+    of raw run signals. No grading here — the caller grades the returned patch.
     """
-    tools = [dict(BASH_TOOL)]
-    tool_attach: Optional[ToolAttach] = None
-    if arm.kind == ArmKind.TOOL:
-        tool_attach = arm.attach()  # type: ignore[attr-defined]
-        if tool_attach.replace_tools:
-            tools = list(tool_attach.tools)
-        else:
-            tools = tools + list(tool_attach.tools)
-        # TODO(woz): spawn tool_attach.mcp_server_cmd as a stdio MCP server and
-        # bridge its tools into `tools` here; tear it down in the finally block.
-        # The Claude Code MCP attach is stubbed until the woz server command lands.
+    import copy
+    from minisweagent.agents.default import DefaultAgent  # lazy
+    from minisweagent.run.benchmarks.swebench import get_sb_environment  # lazy
 
-    env = DockerEnv(instance_id, timeout_s=exec_timeout_s)
-    usage: list[dict] = []
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Task instance: {instance_id}\n\n"
-                                     f"Begin by exploring the repository to locate the bug."},
-    ]
-    calls = 0
-    steps = 0                 # agent loop iterations (one per model call here)
-    tool_call_count = 0       # total tool invocations issued across the run
-    retries = 0              # transient model-call retries (succeeded on retry)
-    degraded = False          # ran, but a transform/curation arm fell back
-    submitted = False
-    time_to_submit_s = 0.0
-    exit_status = "incomplete"
-    patch = ""
-    t0 = time.time()
+    seam = _SeamState()
+    seam.wall_cap_s = float(wall_cap_s)
 
     arm.setup()
+    model_obj = _make_model(model, arm, max_tokens=max_tokens)
+    _install_arm_seam(model_obj, arm, seam)
+
+    instance = _fetch_instance(instance_id, dataset, split)
+    config = copy.deepcopy(_load_swebench_config())
+    agent_cfg = config.get("agent", {})
+    # Map the bench caps onto the agent's native limits. step_limit == call cap
+    # (one model call per step); cost_limit guards $; the wall cap is enforced at
+    # the seam (the agent loop has no wall clock).
+    agent_cfg["step_limit"] = call_cap
+    agent_cfg.setdefault("cost_limit", 0.0)  # 0 == unlimited in minisweagent
+
+    exit_status = "incomplete"
+    patch = ""
+    submitted = False
+    calls = 0
+    steps = 0
+    tool_call_count = 0
+    time_to_submit_s = 0.0
+    t0 = seam.t0
+
+    env = get_sb_environment(config, instance)
     try:
-        env.start()
-        while calls < call_cap:
-            if time.time() - t0 > wall_cap_s:
-                exit_status = "wall_cap"
-                break
-            resp, call_retries = _call_model_with_retry(
-                arm, messages, tools, model=model,
-                max_tokens=max_tokens, usage_sink=usage)
-            retries += call_retries
-            calls += 1
-            steps += 1
-            # an arm that ran but reports a fallback marks the run degraded (measured,
-            # not fatal) — supported on transform arms that expose `last_degraded`.
-            if getattr(arm, "last_degraded", False):
-                degraded = True
-            choice = resp.choices[0]
-            msg = choice.message
-            tool_calls = getattr(msg, "tool_calls", None) or []
-            tool_call_count += len(tool_calls)
-            # record the assistant turn (preserve tool_calls for the API contract).
-            asst = {"role": "assistant", "content": msg.content or ""}
-            if tool_calls:
-                asst["tool_calls"] = [
-                    {"id": tc.id, "type": "function",
-                     "function": {"name": tc.function.name,
-                                  "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            messages.append(asst)
-
-            if not tool_calls:
-                # model answered without acting; nudge it back to the tool, or stop
-                # if it's clearly done.
-                if PATCH_SENTINEL in (msg.content or ""):
-                    exit_status = "submitted"
-                    submitted = True
-                    time_to_submit_s = round(time.time() - t0, 1)
-                    break
-                messages.append({
-                    "role": "user",
-                    "content": "Respond with a `bash` tool call. When the fix is "
-                               f"complete, run: echo {PATCH_SENTINEL}",
-                })
-                continue
-
-            done = False
-            for tc in tool_calls:
-                if tc.function.name != "bash":
-                    out = f"[unknown tool '{tc.function.name}' — only `bash` is available]"
-                else:
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except Exception as e:
-                        args, parse_err = {}, str(e)
-                    else:
-                        parse_err = ""
-                    command = args.get("command", "")
-                    if parse_err:
-                        out = f"[could not parse tool arguments: {parse_err}]"
-                    elif command:
-                        out = env.exec(command)
-                        if PATCH_SENTINEL in command:
-                            done = True
-                    else:
-                        out = "[empty command]"
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": (out or "")[:20000],  # cap a single observation
-                })
-            if done:
-                exit_status = "submitted"
-                submitted = True
-                time_to_submit_s = round(time.time() - t0, 1)
-                break
-        else:
-            exit_status = "call_cap"
-
-        patch = env.get_patch()
+        agent = DefaultAgent(model_obj, env, **agent_cfg)
+        info = agent.run(task=instance.get("problem_statement", "") or f"Fix instance {instance_id}")
+        exit_status = info.get("exit_status", "?") or "?"
+        patch = info.get("submission", "") or ""
+        submitted = bool(patch) or exit_status.lower().startswith("submit")
+        calls = int(getattr(agent, "n_calls", 0) or 0)
+        # one model call per step in DefaultAgent; count assistant turns + their
+        # tool calls for the effort KPIs.
+        msgs = getattr(agent, "messages", []) or []
+        asst = [m for m in msgs if m.get("role") == "assistant"]
+        steps = len(asst) or calls
+        for m in asst:
+            tool_call_count += len(m.get("tool_calls") or [])
+        if submitted:
+            time_to_submit_s = round(time.time() - t0, 1)
+    except _WallCapExceeded:
+        exit_status = "wall_cap"
     except Exception as e:
+        # surface infra failures to the worker (retried once, never counted).
         exit_status = f"infra:{type(e).__name__}"
+        try:
+            env.cleanup()
+        except Exception:
+            pass
+        try:
+            arm.teardown()
+        except Exception:
+            pass
         raise RunInfraError(str(e)[:300]) from e
     finally:
-        env.cleanup()
+        try:
+            env.cleanup()
+        except Exception:
+            pass
         try:
             arm.teardown()
         except Exception:
             pass
 
+    usage = seam.usage
+    calls = calls or len(usage)
+    steps = steps or calls
     in_tok = sum(u["prompt_tokens"] for u in usage)
     out_tok = sum(u["completion_tokens"] for u in usage)
-    # peak single-call prompt (context-window risk; gate2 "max_prompt")
     max_prompt = max((u["prompt_tokens"] for u in usage), default=0)
-    # mean per-call latency over the calls that reported one
     lats = [u["latency_s"] for u in usage if u.get("latency_s") is not None]
     mean_lat = round(sum(lats) / len(lats), 3) if lats else 0.0
-    # limit-death: hit a call/wall cap WITHOUT ever submitting (productive-death)
-    limit_death = (exit_status in ("call_cap", "wall_cap")) and not submitted
+    # limit-death: hit a call/wall cap WITHOUT ever submitting (productive-death).
+    # minisweagent reports a LimitsExceeded exit; treat that + our wall cap as caps.
+    el = exit_status.lower()
+    hit_cap = exit_status == "wall_cap" or "limit" in el or calls >= call_cap
+    limit_death = hit_cap and not submitted
     return {
         "instance": instance_id,
         "arm": arm.name,
@@ -483,8 +451,8 @@ def run_agent(
         "time_to_submit_s": time_to_submit_s,
         "mean_call_latency_s": mean_lat,
         "max_prompt_tokens": max_prompt,
-        "retries": retries,
-        "degraded": degraded,
+        "retries": seam.retries,
+        "degraded": seam.degraded,
     }
 
 
@@ -505,7 +473,7 @@ def _worker(job: tuple) -> dict:
     try:
         arm = get_arm(arm_name)
         raw = run_agent(
-            arm, instance_id, model=model,
+            arm, instance_id, model=model, dataset=dataset, split=split,
             call_cap=call_cap, wall_cap_s=wall_cap_s,
             max_tokens=max_tokens, exec_timeout_s=exec_timeout_s,
         )
@@ -515,7 +483,6 @@ def _worker(job: tuple) -> dict:
         rates = rates_for(model)
         # Price from the REAL per-call cache fields when the provider reported
         # them; fall back to the inferred-from-prompt-growth frame otherwise.
-        # price_run picks the path; both yield the full token + dollar split.
         cb = price_run(raw["usage"], rates)
         uncached = cb.uncached_input_tok
 
@@ -533,8 +500,6 @@ def _worker(job: tuple) -> dict:
             cost_usd=round(cb.total_usd, 6),
             patch=raw["patch"],
             # ── outcome ──
-            # the regression guard held iff every PASS_TO_PASS test still passes
-            # (true by default when the instance declares none).
             pass_to_pass_ok=(g.n_pass_to_pass_passed >= g.n_pass_to_pass),
             limit_death=bool(raw["limit_death"]),
             # ── effort / latency ──
