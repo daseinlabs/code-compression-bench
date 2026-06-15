@@ -43,9 +43,12 @@ Heavy imports (``minisweagent``, ``litellm``) are LAZY so ``--list-arms`` and
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import multiprocessing as mp
 import os
+import shutil
+import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -176,6 +179,10 @@ class _SeamState:
         self.degraded: bool = False
         self.t0: float = time.time()
         self.wall_cap_s: float = float(WALL_CAP_S)
+        # per-call client-side arm effect (TransformArm only): json char counts
+        # of the message array before vs after arm.transform — quantifies what a
+        # client-side arm stripped. Empty for proxy/tool arms (server-side).
+        self.transform_log: list[dict] = []
 
 
 class _WallCapExceeded(Exception):
@@ -211,8 +218,14 @@ def _install_arm_seam(model, arm, seam: _SeamState, max_retries: int = 2):
 
         call_messages = messages
         if is_transform:
-            # arm rewrites the array; baseline returns it unchanged.
+            # arm rewrites the array; baseline returns it unchanged. Record the
+            # per-call client-side effect: json char count before vs after the
+            # transform (proxy/tool arms compress server-side — invisible here).
+            pre_chars = len(json.dumps(messages, default=str))
             call_messages = arm.transform(messages)  # type: ignore[attr-defined]
+            post_chars = len(json.dumps(call_messages, default=str))
+            seam.transform_log.append(
+                {"pre_prompt_chars": pre_chars, "post_prompt_chars": post_chars})
             if getattr(arm, "last_degraded", False):
                 seam.degraded = True
 
@@ -343,6 +356,7 @@ def run_agent(
     wall_cap_s: int = WALL_CAP_S,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     exec_timeout_s: int = 120,
+    traj_path: Optional[str] = None,
 ) -> dict:
     """Drive one (instance, arm) solve with the real minisweagent scaffold.
 
@@ -369,6 +383,12 @@ def run_agent(
     # the seam (the agent loop has no wall clock).
     agent_cfg["step_limit"] = call_cap
     agent_cfg.setdefault("cost_limit", 0.0)  # 0 == unlimited in minisweagent
+    # Let mini-swe-agent write its OWN native trajectory to output_path — the same
+    # contract adaptive_context/eval/mini_swe.py uses (DefaultAgent persists the
+    # full {info, messages, trajectory_format} transcript itself). We do NOT build
+    # a transcript dict by hand; this file IS the durable behavioral trace.
+    if traj_path:
+        agent_cfg["output_path"] = traj_path
 
     exit_status = "incomplete"
     patch = ""
@@ -380,6 +400,7 @@ def run_agent(
     t0 = seam.t0
 
     env = get_sb_environment(config, instance)
+    agent = None
     try:
         agent = DefaultAgent(model_obj, env, **agent_cfg)
         info = agent.run(task=instance.get("problem_statement", "") or f"Fix instance {instance_id}")
@@ -398,6 +419,7 @@ def run_agent(
             time_to_submit_s = round(time.time() - t0, 1)
     except _WallCapExceeded:
         exit_status = "wall_cap"
+        # mini-swe-agent has already flushed whatever it accumulated to output_path.
     except Exception as e:
         # surface infra failures to the worker (retried once, never counted).
         exit_status = f"infra:{type(e).__name__}"
@@ -468,14 +490,22 @@ def _worker(job: tuple) -> dict:
     ``infra_failed=True`` (excluded from metrics, retried once by the driver).
     """
     (instance_id, arm_name, model, dataset, split, call_cap, wall_cap_s,
-     max_tokens, exec_timeout_s, grade_timeout_s) = job
+     max_tokens, exec_timeout_s, grade_timeout_s, out_dir, run_id) = job
     t0 = time.time()
+    # Trace tag mirrors ab_curator's `{run_id}_{arm}` tag (here `{iid}_{run_id}_{arm}`)
+    # so paired arms/runs NEVER collide. The native mini-swe `.traj.json` and the
+    # outcome sidecar both key off this tag, in the durable traj dir that gets rsync'd.
+    traj_dir = Path(out_dir) / "traj"
+    traj_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"{instance_id}_{run_id}_{arm_name}"
+    traj_path = str(traj_dir / f"{tag}.traj.json")
     try:
         arm = get_arm(arm_name)
         raw = run_agent(
             arm, instance_id, model=model, dataset=dataset, split=split,
             call_cap=call_cap, wall_cap_s=wall_cap_s,
             max_tokens=max_tokens, exec_timeout_s=exec_timeout_s,
+            traj_path=traj_path,
         )
         grader = SWEBenchGrader(dataset=dataset, split=split, timeout_s=grade_timeout_s)
         g = grader.grade(instance_id, raw["patch"])
@@ -527,7 +557,23 @@ def _worker(job: tuple) -> dict:
             infra_failed=False,
             error=("grade: " + g.error) if g.error else "",
         )
-        return rec.to_json()
+        run_record = rec.to_json()
+
+        # Per-trace OUTCOME sidecar next to the native mini-swe `.traj.json`,
+        # EXACT ab_curator schema (scripts/ab_curator.py): the trainer attaches a
+        # reward without re-grading. The transcript itself is mini-swe's native
+        # output_path file (written by DefaultAgent) — NOT a reinvented dict.
+        # Best-effort: a write failure must never crash a paid run.
+        try:
+            (traj_dir / f"{tag}.outcome.json").write_text(json.dumps(dict(
+                success=bool(g.success), ftp=float(g.ftp),
+                in_tok=raw["input_tokens"], out_tok=raw["output_tokens"],
+                steps=raw["calls"], exit=raw["exit_status"])), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001 — never crash a paid run on the sidecar write
+            print(f"  WARN: outcome sidecar write failed for {instance_id} [{arm_name}]: "
+                  f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+
+        return run_record
     except RunInfraError as e:
         return _infra_stub(instance_id, arm_name, model, str(e), t0)
     except Exception as e:  # noqa: BLE001 — worker must never crash the pool
@@ -558,6 +604,61 @@ def _load_done(ledger: Path) -> set[tuple[str, str]]:
         if not r.get("infra_failed"):
             done.add((r["instance"], r["arm"]))
     return done
+
+
+# ── durable GCS trace store ──────────────────────────────────────────────────
+def _resolve_run_id(tasks: str, arms: list[str], run_id: Optional[str]) -> str:
+    """A STABLE run id keying the durable trace store. Deterministic so a resumed
+    run targets the SAME GCS prefix (never Date.now()-style nondeterminism).
+
+    If --run-id is given, use it verbatim. Otherwise derive a stable slug from the
+    tasks file basename + the sorted arm set + an 8-char hash of (tasks, arms).
+    """
+    if run_id:
+        return run_id.strip()
+    stem = Path(tasks).stem
+    arms_sorted = sorted(a.lower() for a in arms)
+    key = f"{stem}|{','.join(arms_sorted)}"
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    arms_slug = "-".join(arms_sorted)[:48]
+    return f"{stem}__{arms_slug}__{h}"
+
+
+_GSUTIL: Optional[str] = None
+
+
+def _gsutil_path() -> Optional[str]:
+    """Locate the gsutil binary once; None if it isn't installed (sync is skipped)."""
+    global _GSUTIL
+    if _GSUTIL is None:
+        _GSUTIL = shutil.which("gsutil") or ""
+    return _GSUTIL or None
+
+
+def _rsync_traj(traj_dir: Path, bus: str) -> None:
+    """Durable sync of the whole traj dir to ``{bus}/traj`` — the SAME mechanism
+    scripts/gate2.py uses (``gsutil -q -m rsync -r <traj_dir> <bus>/traj``), run
+    PERIODICALLY (per window/batch) rather than once per trace.
+
+    Best-effort + idempotent: warn and return on ANY failure — a sync failure must
+    NEVER break the eval (gate2's contract). Skipped silently when bus is empty or
+    gsutil isn't installed."""
+    if not bus:
+        return
+    gsutil = _gsutil_path()
+    if not gsutil:
+        return
+    dest = bus.rstrip("/") + "/traj"
+    try:
+        out = subprocess.run(
+            [gsutil, "-q", "-m", "rsync", "-r", str(traj_dir), dest],
+            capture_output=True, text=True, timeout=900,
+        )
+        if out.returncode != 0:
+            print(f"  WARN: gsutil rsync {traj_dir} -> {dest} failed: "
+                  f"{(out.stderr or '').strip()[:160]}", flush=True)
+    except Exception as e:  # noqa: BLE001 — gsutil missing/hung/etc. (never crash the eval)
+        print(f"  WARN: gsutil rsync raised: {type(e).__name__}: {str(e)[:160]}", flush=True)
 
 
 # ── arm readiness listing ─────────────────────────────────────────────────────
@@ -594,6 +695,16 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     ap.add_argument("--exec-timeout-s", type=int, default=120)
     ap.add_argument("--grade-timeout-s", type=int, default=1800)
+    ap.add_argument("--bus", default="gs://dasein-473321-ac-learning/codebench",
+                    help="GCS bus prefix; traj dir is rsync'd to <bus>/traj (same "
+                         "mechanism as gate2, separate codebench/ namespace). Empty "
+                         "string disables sync.")
+    ap.add_argument("--sync-every", type=int, default=20,
+                    help="rsync the traj dir to <bus>/traj after every N completed "
+                         "runs (and once at the end); periodic, not per-trace")
+    ap.add_argument("--run-id", default="",
+                    help="stable run id keying the trace tag (default: a deterministic "
+                         "slug derived from the tasks file + arm set)")
     ap.add_argument("--list-arms", action="store_true", help="list arms + readiness and exit")
     a = ap.parse_args()
 
@@ -627,14 +738,31 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(exist_ok=True)
+    traj_dir = out_dir / "traj"
+    traj_dir.mkdir(exist_ok=True)
     ledger = out_dir / "ledger.jsonl"
 
     done = _load_done(ledger)
     print(f"resume: {len(done)} completed (instance, arm) pairs in {ledger}")
 
+    # durable trace bus: a STABLE run id keys each trace's tag so a resumed run
+    # re-emits the SAME filenames. The native mini-swe `.traj.json` + outcome
+    # sidecar in traj_dir are rsync'd to <bus>/traj (same mechanism as gate2,
+    # separate codebench/ namespace). Empty --bus disables sync entirely.
+    bus = (a.bus or "").strip()
+    run_id = _resolve_run_id(a.tasks, ready_arms, a.run_id)
+    if bus:
+        if _gsutil_path():
+            print(f"trace bus: {bus}/traj  (run_id={run_id})")
+        else:
+            print(f"trace bus: {bus}/traj  (run_id={run_id}) "
+                  f"-- gsutil NOT found; sync will be skipped")
+    else:
+        print("trace bus: disabled (empty --bus)")
+
     jobs = [
         (iid, arm, a.model, a.dataset, a.split, a.call_cap, a.wall_cap_s,
-         a.max_tokens, a.exec_timeout_s, a.grade_timeout_s)
+         a.max_tokens, a.exec_timeout_s, a.grade_timeout_s, str(out_dir), run_id)
         for iid in instances
         for arm in ready_arms
         if (iid, arm) not in done
@@ -649,6 +777,7 @@ def main() -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
     retried: set[tuple[str, str]] = set()
+    completed_since_sync = 0
     with ProcessPoolExecutor(max_workers=a.workers,
                              mp_context=mp.get_context("spawn")) as ex:
         futs = {ex.submit(_worker, j): j for j in jobs}
@@ -680,6 +809,15 @@ def main() -> None:
                         f"cost=${row['cost_usd']:.4f} ({row['exit_status']})")
                 else:
                     log(f"  [{arm_name}] {iid}: infra_failed {row.get('error', '')[:80]}")
+                # durable sync: rsync the whole traj dir to <bus>/traj PERIODICALLY
+                # (every N completed runs), same mechanism as gate2 — NOT per trace.
+                # Best-effort + idempotent; a failure here never crashes the run.
+                completed_since_sync += 1
+                if a.sync_every > 0 and completed_since_sync >= a.sync_every:
+                    _rsync_traj(traj_dir, bus)
+                    completed_since_sync = 0
+    # final: one last rsync so the tail of the run lands on the bus.
+    _rsync_traj(traj_dir, bus)
     log("BENCH_RUN_DONE")
 
 
