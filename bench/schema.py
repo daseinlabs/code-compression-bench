@@ -159,6 +159,7 @@ class RunRecord:
 
     # ── cost (both frames) ──
     cost_usd_list: float = 0.0
+    reported_cost_usd: float = 0.0  # model-service-reported $ (DefaultAgent.cost == v6 cost_usd_real); authoritative headline
     cache_write_usd: float = 0.0
     cache_read_usd: float = 0.0
     output_usd: float = 0.0

@@ -477,6 +477,10 @@ def run_agent(
         "max_prompt_tokens": max_prompt,
         "retries": seam.retries,
         "degraded": seam.degraded,
+        # model-service-reported spend (mini-swe DefaultAgent.cost == v6 cost_usd_real).
+        # This is the AUTHORITATIVE headline $, matching how v6 now tracks spend
+        # (actual reported usage), not our price-table approximation.
+        "reported_cost_usd": float(getattr(agent, "cost", 0.0) or 0.0),
     }
 
 
@@ -529,7 +533,8 @@ def _worker(job: tuple) -> dict:
             cache_read_tok=cb.cache_read_tok,
             calls=raw["calls"],
             wall_s=raw["wall_s"],
-            cost_usd=round(cb.total_usd, 6),
+            # headline $ = model-reported spend (v6 parity) when present, else price-table.
+            cost_usd=round((float(raw.get("reported_cost_usd", 0.0) or 0.0)) or cb.total_usd, 6),
             patch=raw["patch"],
             # ── outcome ──
             pass_to_pass_ok=(g.n_pass_to_pass_passed >= g.n_pass_to_pass),
@@ -546,6 +551,7 @@ def _worker(job: tuple) -> dict:
             cache_hit_rate=round(cb.cache_hit_rate, 4),
             # ── cost (both frames) ──
             cost_usd_list=round(cb.list_usd, 6),
+            reported_cost_usd=round(float(raw.get("reported_cost_usd", 0.0) or 0.0), 6),
             cache_write_usd=round(cb.write_usd, 6),
             cache_read_usd=round(cb.read_usd, 6),
             output_usd=round(cb.output_usd, 6),
