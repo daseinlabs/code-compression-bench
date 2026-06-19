@@ -1,5 +1,8 @@
 # code-compression-bench — developer entrypoints.
-# Every arm runs the SAME model (OPENAI_BASE_URL / OPENAI_API_KEY / MODEL from .env).
+# The fixed agent is headless Claude Code (Python Claude Agent SDK). Every arm
+# runs the SAME Claude Code scaffold against the SAME model (MODEL from .env);
+# only the compression layer (the "arm") differs. ANTHROPIC_API_KEY authenticates
+# the model; the per-run usage gateway is internal (no config needed).
 # Copy .env.example -> .env and fill in before running.
 
 PY ?= python3
@@ -21,15 +24,15 @@ help:
 
 # List arms and whether each is ready (env keys present, proxy reachable).
 arms:
-	$(PY) -m bench.runner --list-arms
+	$(PY) -m bench.cc_runner --list-arms
 
 # Smoke gate: a single task across every ready arm. Fast fail before scaling.
 smoke:
-	$(PY) -m bench.runner --tasks $(TASKS) --arms $(ARMS) --limit 1 --workers $(WORKERS)
+	$(PY) -m bench.cc_runner --tasks $(TASKS) --arms $(ARMS) --limit 1 --workers $(WORKERS)
 
 # Full benchmark run.
 bench:
-	$(PY) -m bench.runner --tasks $(TASKS) --arms $(ARMS) --workers $(WORKERS)
+	$(PY) -m bench.cc_runner --tasks $(TASKS) --arms $(ARMS) --workers $(WORKERS)
 
 # Build the public leaderboard, figures, and README assets from the ledger.
 report:

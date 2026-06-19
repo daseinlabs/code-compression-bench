@@ -19,8 +19,8 @@ different success bar — so none of them are comparable, and none tell you the 
 
 This benchmark fixes everything except the compression layer:
 
-- **One scaffold** — a fixed, open coding agent (open-swe-lite / mini-swe-agent).
-- **One model** — the same Sonnet-class model for every arm (bring your own OpenAI-compatible endpoint).
+- **One scaffold** — a fixed agent: headless **Claude Code**, driven through the Python Claude Agent SDK.
+- **One model** — the same Claude-class model for every arm (bring your own `ANTHROPIC_API_KEY`).
 - **One task set** — a frozen slice of **SWE-bench Verified**, graded by the **official Docker harness**
   (a fix counts only if the repo's fail-to-pass tests pass and nothing else breaks).
 - **One leaderboard** — ranked by real money: **cost per solved task**.
@@ -78,7 +78,7 @@ make report
 ```
 
 Every arm runs the **same** model through the **same** scaffold; only the compression layer differs. Arms
-whose keys/endpoints aren't configured are skipped automatically (`python -m bench.runner --list-arms`
+whose keys/endpoints aren't configured are skipped automatically (`python -m bench.cc_runner --list-arms`
 shows what's ready). Anyone who runs this gets the same figures and leaderboard regenerated from their own
 results.
 

@@ -1,0 +1,243 @@
+"""Unit tests for bench.usage_gateway — the usage-capturing reverse-proxy.
+
+These assert the ONE thing the gateway must get right: it extracts the Anthropic
+cache split (prompt/completion/cache_creation/cache_read) into a CallUsage row,
+from BOTH response shapes the Messages API uses:
+
+  1. a non-streaming JSON body (usage object on the response);
+  2. a streaming SSE body (usage split across message_start + message_delta).
+
+Two layers of coverage, both pure-Python (no claude_agent_sdk, no node):
+
+  * unit: feed extract_usage / usage_from_sse the sample payloads directly and
+    assert the parsed CallUsage row;
+  * integration: stand up a MOCK upstream HTTP server that returns those exact
+    payloads, point a real UsageGateway at it, fire a request through the gateway
+    (urllib), and assert the gateway (a) relayed the body faithfully AND (b) wrote
+    the right CallUsage row to the per-run JSONL.
+
+Runnable two ways:
+    py -m pytest tests/test_usage_gateway.py -q
+    py tests/test_usage_gateway.py            # standalone, prints PASS/FAIL
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Thread
+
+# make the repo root importable when run as a bare script (py tests/...).
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from bench.usage_gateway import (  # noqa: E402
+    RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
+)
+
+
+# ── sample payloads (real Anthropic Messages API shapes) ─────────────────────
+# A non-streaming /v1/messages response. usage.input_tokens is the UNCACHED new
+# input; the cache split is reported separately.
+SAMPLE_JSON_RESPONSE = {
+    "id": "msg_01ABC",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-4-5",
+    "content": [{"type": "text", "text": "done"}],
+    "stop_reason": "end_turn",
+    "usage": {
+        "input_tokens": 120,                 # uncached new input
+        "output_tokens": 45,
+        "cache_creation_input_tokens": 800,  # cache WRITE
+        "cache_read_input_tokens": 5000,     # cache READ
+    },
+}
+
+# A streaming /v1/messages SSE body: message_start carries the input side + the
+# cache split; message_delta carries the running output_tokens.
+SAMPLE_SSE_BODY = (
+    "event: message_start\n"
+    'data: {"type":"message_start","message":{"id":"msg_01X","model":"claude-sonnet-4-5",'
+    '"usage":{"input_tokens":120,"output_tokens":1,'
+    '"cache_creation_input_tokens":800,"cache_read_input_tokens":5000}}}\n\n'
+    "event: content_block_start\n"
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+    "event: content_block_delta\n"
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
+    "event: message_delta\n"
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+    '"usage":{"output_tokens":45}}\n\n'
+    "event: message_stop\n"
+    'data: {"type":"message_stop"}\n\n'
+    "data: [DONE]\n\n"
+)
+
+# Expected CallUsage after normalization: prompt_tokens == FULL billable input
+# (uncached 120 + write 800 + read 5000 = 5920); completion == 45.
+EXPECTED = {
+    "prompt_tokens": 5920,
+    "completion_tokens": 45,
+    "cache_creation_input_tokens": 800,
+    "cache_read_input_tokens": 5000,
+}
+
+
+def _assert_row(row: dict) -> None:
+    assert row is not None, "expected a CallUsage row, got None"
+    for k, v in EXPECTED.items():
+        assert row.get(k) == v, f"{k}: expected {v}, got {row.get(k)}"
+
+
+# ── 1. unit: extract_usage off a JSON response usage object ──────────────────
+def test_extract_usage_json_shape():
+    row = extract_usage(SAMPLE_JSON_RESPONSE["usage"], latency_s=1.23)
+    _assert_row(row)
+    assert row["latency_s"] == 1.23
+
+
+def test_extract_usage_no_cache_fields():
+    # an all-cold call (no cache split reported): prompt == input, no cache keys.
+    row = extract_usage({"input_tokens": 300, "output_tokens": 10})
+    assert row["prompt_tokens"] == 300
+    assert row["completion_tokens"] == 10
+    assert "cache_creation_input_tokens" not in row
+    assert "cache_read_input_tokens" not in row
+
+
+def test_extract_usage_empty_returns_none():
+    assert extract_usage(None) is None
+    assert extract_usage({}) is None
+    assert extract_usage({"input_tokens": 0, "output_tokens": 0}) is None
+
+
+# ── 2. unit: usage_from_sse merges message_start + message_delta ──────────────
+def test_usage_from_sse_merges_events():
+    merged = usage_from_sse(SAMPLE_SSE_BODY)
+    assert merged is not None
+    # output_tokens comes from the message_delta (running total), not message_start
+    assert merged["output_tokens"] == 45
+    assert merged["input_tokens"] == 120
+    assert merged["cache_creation_input_tokens"] == 800
+    assert merged["cache_read_input_tokens"] == 5000
+    # and the full extraction yields the same normalized row as the JSON path
+    _assert_row(extract_usage(merged))
+
+
+def test_usage_from_sse_no_usage_returns_none():
+    body = ("event: ping\ndata: {\"type\":\"ping\"}\n\n"
+            "data: [DONE]\n\n")
+    assert usage_from_sse(body) is None
+
+
+# ── mock upstream (returns the sample payloads) ──────────────────────────────
+def _make_mock_upstream(stream: bool):
+    """A tiny HTTP server that echoes a fixed Anthropic-shaped response.
+
+    Returns (server, base_url). stream=True replies with the SSE body +
+    text/event-stream; stream=False with the JSON body. It also echoes back a
+    header so the integration test can confirm faithful header relay.
+    """
+    body = (SAMPLE_SSE_BODY.encode() if stream
+            else json.dumps(SAMPLE_JSON_RESPONSE).encode())
+    ctype = "text/event-stream" if stream else "application/json"
+
+    class _Mock(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # silence
+            return
+
+        def do_POST(self):  # noqa: N802
+            # drain the request body so the connection closes cleanly
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("X-Mock-Echo", "ok")
+            if not stream:
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Mock)
+    Thread(target=srv.serve_forever, daemon=True).start()
+    host, port = srv.server_address
+    return srv, f"http://{host}:{port}"
+
+
+# ── 3. integration: a request through the real gateway logs the right row ─────
+def _through_gateway(stream: bool):
+    mock_srv, upstream = _make_mock_upstream(stream)
+    tmp = tempfile.mkdtemp(prefix="ccb_gw_")
+    gw = UsageGateway(upstream_base=upstream, log_dir=tmp,
+                      default_run_id="rid-1").start()
+    try:
+        req = urllib.request.Request(
+            gw.base_url + "/v1/messages",
+            data=json.dumps({"model": "claude-sonnet-4-5",
+                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json",
+                     "anthropic-version": "2023-06-01",
+                     "anthropic-beta": "prompt-caching-2024-07-31",
+                     "Authorization": "Bearer sk-test",
+                     RUN_ID_HEADER: "rid-1"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        relayed = resp.read()
+        # (a) the gateway relayed the upstream body + headers faithfully
+        assert resp.headers.get("X-Mock-Echo") == "ok"
+        assert b"usage" in relayed or b"message_delta" in relayed
+        # (b) the gateway wrote the right CallUsage row to the per-run JSONL. The
+        # streaming path logs usage on the handler thread just after the client
+        # sees stream-end, so poll briefly for the row to appear (a real reader —
+        # the runner — reads after gw.stop() drains the server, so this race is
+        # test-only). The non-streaming path logs BEFORE relaying, so it's instant.
+        path = gw.usage_path("rid-1")
+        lines: list[str] = []
+        for _ in range(50):  # up to ~1s
+            if path.exists():
+                lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                if lines:
+                    break
+            time.sleep(0.02)
+        assert len(lines) == 1, f"expected exactly one usage row, got {len(lines)}"
+        _assert_row(json.loads(lines[0]))
+    finally:
+        gw.stop()
+        mock_srv.shutdown()
+        mock_srv.server_close()
+
+
+def test_gateway_logs_usage_json_path():
+    _through_gateway(stream=False)
+
+
+def test_gateway_logs_usage_sse_path():
+    _through_gateway(stream=True)
+
+
+# ── standalone runner (py tests/test_usage_gateway.py) ───────────────────────
+def _run_standalone() -> int:
+    tests = [v for k, v in sorted(globals().items())
+             if k.startswith("test_") and callable(v)]
+    failures = 0
+    for t in tests:
+        try:
+            t()
+            print(f"PASS  {t.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL  {t.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(tests) - failures}/{len(tests)} passed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_standalone())
