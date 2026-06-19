@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -244,6 +245,84 @@ def _strip_vertex_prefix(model: str) -> str:
     return model
 
 
+# ── anthropic-beta forwarding (filter the betas Vertex doesn't accept) ────────
+# Claude Code forwards an ``anthropic-beta`` header carrying its negotiated beta
+# capabilities (claude-code-*, interleaved-thinking-*, context-management-*,
+# structured-outputs-*, prompt-caching-scope-*, …). AnthropicVertex ACCEPTS most
+# of these, but REJECTS some with ``400 invalid_request_error: Unexpected
+# value(s) `<beta>` `` — forwarding the FULL set 400s the whole call, so the
+# Vertex-unsupported betas MUST be stripped before we forward. The first known
+# offender is the ``prompt-caching-scope`` family; we drop it by PREFIX so the
+# filter is version-robust (``prompt-caching-scope-2026-01-05`` and any future
+# dated variant). _make_vertex_completion adds a self-healing retry on top of
+# this for betas that become unsupported later.
+_VERTEX_UNSUPPORTED_BETA_PREFIXES = (
+    "prompt-caching-scope",
+)
+
+
+def _filter_vertex_betas(header_value: Optional[str]) -> str:
+    """Drop Vertex-unsupported betas from a comma-separated ``anthropic-beta`` value.
+
+    Splits the header on commas, strips whitespace, and removes any beta whose
+    name starts with one of ``_VERTEX_UNSUPPORTED_BETA_PREFIXES`` (prefix match —
+    version-robust). Returns the surviving betas rejoined with ``","`` (no spaces),
+    or ``""`` if none remain / the input is None/empty.
+    """
+    if not header_value:
+        return ""
+    kept = []
+    for raw in header_value.split(","):
+        beta = raw.strip()
+        if not beta:
+            continue
+        if any(beta.startswith(p) for p in _VERTEX_UNSUPPORTED_BETA_PREFIXES):
+            continue
+        kept.append(beta)
+    return ",".join(kept)
+
+
+# Vertex reports unsupported betas as ``Unexpected value(s) `<beta>` `` (one or
+# more backtick-quoted tokens). This pulls the token(s) out so the self-healing
+# retry in _make_vertex_completion can strip exactly those and try again.
+_UNEXPECTED_VALUE_BETA_RE = re.compile(r"`([^`]+)`")
+
+
+def _betas_from_unexpected_value_error(message: str) -> list:
+    """Extract the backtick-quoted beta token(s) from a Vertex 'Unexpected value(s)'
+    error message. Returns the list of offending beta names (possibly empty)."""
+    if "Unexpected value(s)" not in message:
+        return []
+    return [m.strip() for m in _UNEXPECTED_VALUE_BETA_RE.findall(message) if m.strip()]
+
+
+def _strip_betas_from_kwargs(create_kwargs: dict, offenders) -> bool:
+    """Remove ``offenders`` from ``create_kwargs["extra_headers"]["anthropic-beta"]``.
+
+    Returns True if anything was actually removed (so the caller knows to retry).
+    If the ``anthropic-beta`` value empties out, the key is removed; if
+    ``extra_headers`` empties out, it's dropped entirely.
+    """
+    headers = create_kwargs.get("extra_headers")
+    if not isinstance(headers, dict):
+        return False
+    current = headers.get("anthropic-beta")
+    if not current:
+        return False
+    offender_set = {o.strip() for o in offenders}
+    kept = [b.strip() for b in current.split(",")
+            if b.strip() and b.strip() not in offender_set]
+    if len(kept) == len([b for b in current.split(",") if b.strip()]):
+        return False  # nothing matched — don't loop forever
+    if kept:
+        headers["anthropic-beta"] = ",".join(kept)
+    else:
+        headers.pop("anthropic-beta", None)
+        if not headers:
+            create_kwargs.pop("extra_headers", None)
+    return True
+
+
 # Native Anthropic Messages fields we pass through verbatim when present. The
 # inbound request IS Anthropic Messages format and the target IS Anthropic — so
 # this is a pure passthrough; we never translate to a foreign (OpenAI) shape.
@@ -260,13 +339,18 @@ def _anthropic_create_kwargs(body: dict, model: str) -> dict:
 
     Pass through ONLY the recognized native Anthropic fields that are present in
     the inbound body (don't fabricate absent ones), plus ``max_tokens`` (default
-    4096 if absent — Anthropic requires it) and the configured Vertex ``model``.
+    64000 if absent — Anthropic requires it) and the configured Vertex ``model``.
     We do NOT include ``stream`` (handled separately) and do NOT forward the
     client's ``model`` (we always route to the configured Vertex model id).
+
+    The client's ``max_tokens`` passes through unchanged — Claude Code ALWAYS
+    sends one (the API requires it; it sends 32000), so the absent-case default
+    is never hit in practice. It exists only as a safe floor; 64000 is Sonnet
+    4.x's max output, so the floor can't truncate a reply on its own.
     """
     kwargs: dict = {
         "model": model,
-        "max_tokens": int(body.get("max_tokens") or 4096),
+        "max_tokens": int(body.get("max_tokens") or 64000),
         "messages": body.get("messages") or [],
     }
     for k in _NATIVE_PASSTHROUGH_FIELDS:
@@ -472,12 +556,22 @@ def _make_vertex_completion(project: str, location: str):
 
     Returns a ``completion_fn(create_kwargs) -> iterable_of_events`` closure.
     ``create_kwargs`` already carries ``model`` (bare id) + the native Anthropic
-    fields; we call ``stream=True`` and RETURN the SDK's event iterator. The events
-    are native Anthropic SSE events (message_start, content_block_*, message_delta,
+    fields (and, when the inbound request forwarded any, ``extra_headers`` with a
+    pre-filtered ``anthropic-beta`` — see ``_filter_vertex_betas``); we call
+    ``stream=True`` and RETURN the SDK's event iterator. The events are native
+    Anthropic SSE events (message_start, content_block_*, message_delta,
     message_stop) — the gateway relays them verbatim. ``stream=True`` is REQUIRED:
     Claude Code sends a large ``max_tokens`` and the SDK refuses the equivalent
     non-streaming call with ``ValueError: Streaming is required for operations that
     may take longer than 10 minutes`` — iterating a stream avoids that guard.
+
+    SELF-HEALING against Vertex beta drift: ``_bridge_vertex`` pre-filters the
+    KNOWN-unsupported betas, but if a NEWLY-unsupported beta slips through, Vertex
+    400s with ``Unexpected value(s) `<beta>` ``. Rather than fail the run, we parse
+    the offending beta token(s) out of that message, strip them from
+    ``extra_headers["anthropic-beta"]``, and RETRY (up to 2 strips); if the header
+    empties out we drop ``extra_headers`` entirely. So a beta that becomes
+    unsupported tomorrow auto-recovers instead of breaking the panel.
     """
     cache: dict = {}
 
@@ -487,6 +581,20 @@ def _make_vertex_completion(project: str, location: str):
             from anthropic import AnthropicVertex  # lazy — heavy, Vertex-mode only
             client = AnthropicVertex(project_id=project, region=location)
             cache["client"] = client
+
+        # Up to 2 self-healing strips of a newly-unsupported beta, then give up
+        # (re-raise) — the bridge's clean Anthropic-shaped error path handles it.
+        for _ in range(3):
+            try:
+                return client.messages.create(stream=True, **create_kwargs)
+            except Exception as e:  # noqa: BLE001 — match the message, no anthropic import
+                msg = str(e)
+                if "Unexpected value(s)" not in msg:
+                    raise
+                offenders = _betas_from_unexpected_value_error(msg)
+                if not offenders or not _strip_betas_from_kwargs(create_kwargs, offenders):
+                    raise  # nothing left to strip / nothing matched — propagate
+        # exhausted retries — one last attempt so the real error surfaces
         return client.messages.create(stream=True, **create_kwargs)
 
     return _complete
@@ -580,6 +688,15 @@ def make_handler(upstream_base: str, sink: UsageSink,
             # completion_fn calls stream=True and returns the native event iterator.
             model = _strip_vertex_prefix(vertex_model)
             kwargs = _anthropic_create_kwargs(req_body, model)
+            # Forward Claude Code's negotiated betas (interleaved-thinking,
+            # context-management, structured-outputs, …) to Vertex, pre-dropping the
+            # ones Vertex rejects (prompt-caching-scope*); the completion_fn
+            # self-heals on any newly-unsupported beta. Without this the agent
+            # silently loses real capabilities — notably context-management, which
+            # is how it sustains long/large-context runs.
+            betas = _filter_vertex_betas(self.headers.get("anthropic-beta"))
+            if betas:
+                kwargs["extra_headers"] = {"anthropic-beta": betas}
             client_wants_stream = bool(req_body.get("stream"))
             try:
                 event_stream = _complete(kwargs)

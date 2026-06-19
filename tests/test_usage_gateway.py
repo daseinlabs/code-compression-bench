@@ -355,10 +355,11 @@ def test_anthropic_create_kwargs_passthrough():
 
 
 def test_anthropic_create_kwargs_defaults_max_tokens():
-    """max_tokens defaults to 4096 when the inbound body omits it."""
+    """max_tokens defaults to Sonnet 4.x's max output (64000) when the body omits it
+    — a safe floor that can't truncate; Claude Code always sends its own (32000)."""
     kw = _anthropic_create_kwargs(
         {"messages": [{"role": "user", "content": "hi"}]}, "claude-sonnet-4-6")
-    assert kw["max_tokens"] == 4096
+    assert kw["max_tokens"] == 64000
     assert kw["messages"] == [{"role": "user", "content": "hi"}]
 
 
