@@ -459,7 +459,8 @@ def _spawn_mcp_for_arm(attach, *, cwd: Optional[str]):
     return client, specs, mcp_names
 
 
-def _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names: set, exec_timeout_s: int):
+def _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names: set, exec_timeout_s: int,
+                          tool_cwd: Optional[str] = None):
     """Build a DefaultAgent subclass that DISPATCHES tool calls by name.
 
     The only change vs the stock agent is ``execute_actions``: each parsed action
@@ -470,7 +471,36 @@ def _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names: set, exec_timeout
     Observations are then formatted by the stock ``format_observation_messages``
     (keyed by ``tool_call_id``), so the transcript shape is byte-identical to a
     normal run — only the SOURCE of an observation differs.
+
+    ``tool_cwd`` (general — NOT woz-specific): a DIRECT MCP client gets none of
+    the auto-injection a real Claude Code harness does. Claude Code injects the
+    working dir into every tool call (the tools' schemas say "do NOT set cwd" —
+    but that instruction is for the HARNESS; a raw MCP client receives nothing).
+    So when set, we inject ``cwd=<tool_cwd>`` into the MCP tool-call arguments so
+    the server (e.g. Woz's Search) greps/reads the intended path. We do NOT
+    overwrite a cwd the model itself supplied. This is the path the server
+    searches against.
+
+    *** SMOKE-TIME OPEN ITEM (host vs container) ***************************
+    For the woz arm, the MCP server runs on the HOST runner but the swebench
+    repo lives inside the per-task DOCKER CONTAINER. Injecting a host ``cwd``
+    only helps if the task repo is reachable at that host path (copied/mounted),
+    OR if Woz is run INSIDE the container instead. Until that is settled on the
+    Linux box, Search will grep the host working dir, not the task repo. See the
+    same warning in arms/woz.py. Do not assume host cwd injection alone works.
+    ************************************************************************
     """
+
+    # MCP errors come back as observation TEXT (mcp_client.call_tool prefixes an
+    # isError result with "[tool error]" — e.g. Woz's auth.login_required, which
+    # tells the agent to fall back to Bash). We surface that text to the agent as
+    # the observation and NEVER crash the run on it.
+    def _inject_cwd(args: dict) -> dict:
+        if not tool_cwd:
+            return args
+        a = dict(args or {})
+        a.setdefault("cwd", tool_cwd)  # don't clobber a model-supplied cwd
+        return a
 
     class _McpAgent(DefaultAgent):  # type: ignore[valid-type, misc]
         def execute_actions(self, message: dict) -> list[dict]:
@@ -481,9 +511,13 @@ def _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names: set, exec_timeout
                 if name in mcp_names:
                     try:
                         text = mcp_client.call_tool(
-                            name, action.get("tool_args", {}),
+                            name, _inject_cwd(action.get("tool_args", {})),
                             timeout_s=float(exec_timeout_s) if exec_timeout_s else 120.0,
                         )
+                        # text may be an "[tool error] ..." string (graceful: a
+                        # deauth'd / isError result is the OBSERVATION, not a
+                        # crash). returncode 0 keeps the agent loop going so it
+                        # can act on the message (e.g. fall back to Bash).
                         outputs.append({"output": text, "returncode": 0, "exception_info": ""})
                     except Exception as e:  # noqa: BLE001 — surface as an observation, never crash the loop
                         outputs.append({
@@ -529,7 +563,16 @@ def run_agent(
     seam = _SeamState()
     seam.wall_cap_s = float(wall_cap_s)
 
-    arm.setup()
+    # One-time arm prep (e.g. the Woz CLI login that authenticates its MCP
+    # server). A setup failure (bad key / missing CLI / old node) must surface as
+    # an infra failure for THIS arm — retried once, never counted — not crash the
+    # worker silently. We raise RunInfraError so _worker handles it like any other
+    # infra fault.
+    try:
+        arm.setup()
+    except Exception as e:  # noqa: BLE001
+        raise RunInfraError(f"arm.setup() failed for '{arm.name}': "
+                            f"{type(e).__name__}: {str(e)[:200]}") from e
 
     # ── ToolArm: spawn the REAL MCP server, discover its REAL tools ───────────
     # The MCP server is launched here (run scope) so its lifecycle is owned by
@@ -539,14 +582,22 @@ def run_agent(
     mcp_specs: list[dict] = []
     mcp_names: set = set()
     replace_bash = False
+    # The path an MCP tool (e.g. Woz's Search) should grep/read. A DIRECT MCP
+    # client must pass cwd in the tool-call args — Claude Code injects it
+    # automatically; a raw client gets nothing. General (not woz-hardcoded):
+    # WOZ_SEARCH_CWD overrides; default is the run's working/repo path (the
+    # process cwd here). NOTE the host/container open item flagged in
+    # _make_mcp_agent_class: a host cwd only reaches the task repo if that repo is
+    # mounted/copied to the host path (or Woz runs inside the container).
+    tool_cwd: Optional[str] = os.environ.get("WOZ_SEARCH_CWD") or os.getcwd()
     if arm.kind == ArmKind.TOOL:
         attach = arm.attach()  # type: ignore[attr-defined]
         if attach.mcp_server_cmd:
-            # Index against the same repo the agent edits. The swebench env runs
-            # in a container, so the server's cwd is the launch cwd (the runner
-            # box working dir); a server that needs the repo path reads it via
-            # its own cwd hook / env. We pass the process cwd (None => inherit).
-            mcp_client, mcp_specs, mcp_names = _spawn_mcp_for_arm(attach, cwd=None)
+            # Spawn the server with the same cwd we inject into tool calls so the
+            # server's own cwd hook and the per-call cwd agree on one path. (The
+            # swebench env runs in a container; reaching the task repo from a
+            # host-spawned server is the unresolved smoke-time item above.)
+            mcp_client, mcp_specs, mcp_names = _spawn_mcp_for_arm(attach, cwd=tool_cwd)
         else:
             # No server command (e.g. a hosted MCP we don't spawn): there is
             # nothing for the runner to dispatch tool calls TO. Advertising tools
@@ -595,7 +646,8 @@ def run_agent(
     # calls route to the MCP client and bash/non-MCP tools route to the env.
     AgentClass = DefaultAgent
     if mcp_client is not None and mcp_names:
-        AgentClass = _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names, exec_timeout_s)
+        AgentClass = _make_mcp_agent_class(
+            DefaultAgent, mcp_client, mcp_names, exec_timeout_s, tool_cwd=tool_cwd)
     try:
         agent = AgentClass(model_obj, env, **agent_cfg)
         info = agent.run(task=instance.get("problem_statement", "") or f"Fix instance {instance_id}")
