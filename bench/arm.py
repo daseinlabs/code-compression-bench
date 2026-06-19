@@ -66,18 +66,34 @@ class ToolAttach:
                       static specs are advertised solely if discovery returns
                       nothing.
     mcp_server_cmd  : argv for the MCP stdio server to spawn (None if the arm uses
-                      a hosted/remote MCP). The runner launches and tears this down.
-    replace_tools   : if True, the discovered (or fallback) tools REPLACE the
-                      scaffold's default bash tool; if False (default), they are
-                      advertised alongside it.
+                      a hosted/remote MCP, or loads a full plugin — see plugin_dir).
+                      The runner launches and tears this down.
+    plugin_dir      : path to a local Claude Code PLUGIN root to load via the SDK
+                      ``plugins=[{"type":"local","path":...}]``. When set, the runner
+                      loads the WHOLE plugin, so Claude Code activates the plugin's
+                      OWN subagents (e.g. Woz's haiku ``explore``), MCP server, hooks
+                      and skills — the real shipped product — INSTEAD of spawning a
+                      bare server and approximating its subagents. This is the
+                      faithful way to run a plugin-shaped arm (Woz); it supersedes
+                      mcp_server_cmd for that arm.
+    plugin_tool_globs: tool-name globs the plugin contributes that the agent must be
+                      allowed to call, e.g. ["mcp__plugin_woz_code__*"] (plugin name
+                      ``woz`` + MCP server name ``code``).
+    replace_tools   : if True, the agent works THROUGH the plugin's/arm's own tools:
+                      the runner drops the native file surface (Read/Edit/Write/
+                      Grep/Glob/...) so a Woz-style arm's tools are actually used,
+                      not bypassed. If False (default), they are advertised alongside.
     server_env      : extra environment variables to pass to the spawned MCP
                       server process (merged over a copy of os.environ). Secrets
                       (API keys) and server config go HERE — never into argv, so
-                      they don't leak into process listings / logs.
+                      they don't leak into process listings / logs. (Unused when a
+                      plugin is loaded: the plugin's own .mcp.json carries its env.)
     """
 
     tools: list[dict] = field(default_factory=list)
     mcp_server_cmd: Optional[list[str]] = None
+    plugin_dir: Optional[str] = None
+    plugin_tool_globs: list[str] = field(default_factory=list)
     replace_tools: bool = False
     server_env: dict[str, str] = field(default_factory=dict)
 

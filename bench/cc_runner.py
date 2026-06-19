@@ -30,12 +30,15 @@ the REAL post-compression usage the model billed (the cache split included).
 
     woz (ToolArm)
         Claude Code ── ANTHROPIC_BASE_URL=gateway ──> gateway ──> Vertex  (model
-        direct, like A0) PLUS the Woz MCP plugin attached via
-        ClaudeAgentOptions.mcp_servers (command + args + env from arm.attach());
-        its tools are allowed (mcp__<server>__*) and, per replace_tools, the
-        native edit/grep tools are disallowed so the agent reaches the repo
-        through Woz's tools. The Woz explorer subagent is enabled via
-        ClaudeAgentOptions.agents.
+        direct, like A0) PLUS Woz's REAL plugin loaded via
+        ClaudeAgentOptions.plugins=[{"type":"local","path":WOZ_PLUGIN_DIR}]. Claude
+        Code activates the plugin's OWN code/explore subagents (the haiku explorer
+        with Woz's Search/Sql tools + its terse format), its `code` MCP server
+        (mcp__plugin_woz_code__*), hooks and skills — the shipped product. Per
+        replace_tools the native file tools are disallowed so the agent works
+        THROUGH Woz's tools. We do NOT redefine the explorer (that would measure an
+        approximation); strict_mcp_config is off here so the plugin MCP isn't
+        suppressed.
 
 We do NOT set ``CLAUDE_CODE_USE_VERTEX``: Claude Code speaks the Anthropic API to
 the proxy/gateway above it; the GATEWAY is the only thing that bridges to Vertex.
@@ -125,6 +128,14 @@ DEFAULT_ALLOWED_TOOLS = [
 # grep/edit surface with Search/Edit). Bash/Read stay so the agent can still run
 # the test suite and read files the MCP tool points it at.
 _REPLACE_TOOLS_DROP = ["Edit", "Write", "MultiEdit", "Glob", "Grep"]
+# The native surface a PLUGIN's main agent disallows so the run goes THROUGH the
+# plugin's own tools. Reproduces Woz's agents/code.md `disallowedTools` exactly
+# (Read, Edit, Write, Grep, Glob, NotebookEdit) + MultiEdit (a native edit tool),
+# so the main thread is faithful to Woz's `code` agent: it reads/edits via Woz's
+# Search/Edit, not Claude Code's native file tools. (No native fallback on purpose
+# — if the plugin's tools don't load, the run produces nothing, which SURFACES the
+# failure at smoke instead of silently measuring the native agent.)
+_PLUGIN_NATIVE_DISALLOWED = ["Read", "Edit", "Write", "Grep", "Glob", "MultiEdit", "NotebookEdit"]
 
 
 # ── task set loading (identical to bench.runner) ─────────────────────────────
@@ -177,10 +188,14 @@ class _ArmConfig:
                           ToolArm    -> the gateway URL (model direct; arm adds TOOLS)
       proxy_base_url  : the vendor proxy URL for a ProxyArm (else ""). Recorded so
                         the worker can log the chain + confirm provisioning intent.
-      mcp_servers     : ClaudeAgentOptions.mcp_servers dict (ToolArm only).
+      mcp_servers     : ClaudeAgentOptions.mcp_servers dict (only a bare/hosted-MCP
+                        ToolArm; a plugin-loading arm uses `plugins` instead).
+      plugins         : ClaudeAgentOptions.plugins (a plugin-shaped ToolArm like
+                        Woz — loads the plugin's OWN subagents/MCP/hooks/skills).
       allowed_tools   : the agent's tool surface.
-      disallowed_tools: tools removed (ToolArm replace_tools).
-      agents          : subagent definitions (ToolArm explorer subagent).
+      disallowed_tools: tools removed (ToolArm replace_tools: native file tools).
+      agents          : subagent definitions — EMPTY for a plugin arm (the plugin
+                        ships its real subagents; we never synthesize one).
       setup_arm       : the Arm instance (its setup()/teardown() are run by the
                         worker; e.g. the Woz one-time CLI login).
 
@@ -196,6 +211,7 @@ class _ArmConfig:
         self.client_base_url: Optional[str] = None
         self.proxy_base_url: str = ""
         self.mcp_servers: dict = {}
+        self.plugins: list = []          # SDK plugins=[{"type":"local","path":...}]
         self.allowed_tools: list[str] = list(DEFAULT_ALLOWED_TOOLS)
         self.disallowed_tools: list[str] = []
         self.agents: dict = {}
@@ -249,27 +265,40 @@ def build_arm_config(arm) -> _ArmConfig:
             cfg.proxy_base_url = base
 
     elif arm.kind == ArmKind.TOOL:
-        # Model goes direct to the gateway (same as A0); the arm contributes TOOLS
-        # via MCP. client_base_url stays None -> worker points it at the gateway.
+        # Model goes direct to the gateway (same as A0); the arm contributes TOOLS.
+        # client_base_url stays None -> worker points it at the gateway.
         attach = arm.attach()  # type: ignore[attr-defined]
-        server_cfg = _woz_mcp_server_config(attach)
-        server_name = arm.name  # mcp server key == arm name (e.g. "woz")
-        if server_cfg is not None:
-            cfg.mcp_servers = {server_name: server_cfg}
-            # Allow this server's tools (wildcard) so the agent can call them.
-            cfg.allowed_tools = list(DEFAULT_ALLOWED_TOOLS) + [f"mcp__{server_name}__*"]
-            # replace_tools (the woz contract): drop the native file/grep surface
-            # so the agent reaches the repo through the arm's MCP tools — but keep
-            # Bash/Read so it can still run tests and open files. Never strand it
-            # with no reachable tool.
+        plugin_dir = getattr(attach, "plugin_dir", None)
+        if plugin_dir:
+            # LOAD THE REAL PLUGIN. Claude Code activates the plugin's OWN subagents
+            # (e.g. Woz's haiku `explore`, with Woz's Search/Sql tools + its terse
+            # output format), its MCP server (tools under mcp__plugin_<plugin>_<srv>__*),
+            # hooks and skills — the shipped product. We deliberately do NOT redefine
+            # the explore subagent (a same-model read-only reconstruction would measure
+            # an approximation, not Woz). strict_mcp_config is turned OFF in _run_sdk
+            # when plugins are present, else plugin MCP servers get suppressed.
+            cfg.plugins = [{"type": "local", "path": os.path.abspath(plugin_dir)}]
+            globs = list(getattr(attach, "plugin_tool_globs", []) or [])
             if getattr(attach, "replace_tools", False):
-                cfg.disallowed_tools = list(_REPLACE_TOOLS_DROP)
-            # Enable the explorer subagent (the SDK supports subagents). A
-            # read-only explorer that fans out repo discovery, on the same model.
-            cfg.agents = _explorer_agent_def(server_name)
-        # No server command (hosted MCP we don't spawn): advertise nothing extra,
-        # keep the native surface — the runner has nothing to dispatch tool calls
-        # TO, so dead tool calls would just waste turns.
+                # Be faithful to the plugin's main agent (Woz's code.md disallows the
+                # native file surface): the main thread works THROUGH the plugin's
+                # tools. Allow the plugin tools + Agent (so it delegates to the REAL
+                # explore subagent) + Bash (run tests); drop native file tools.
+                cfg.disallowed_tools = list(_PLUGIN_NATIVE_DISALLOWED)
+                cfg.allowed_tools = ["Bash", "TodoWrite", "Agent"] + globs
+            else:
+                cfg.allowed_tools = list(DEFAULT_ALLOWED_TOOLS) + ["Agent"] + globs
+            # NB: no cfg.agents and no cfg.mcp_servers — both come FROM the plugin.
+        else:
+            # Fallback: a bare/hosted MCP server (no plugin to load). Advertise its
+            # tools; this path does NOT fabricate a subagent.
+            server_cfg = _woz_mcp_server_config(attach)
+            server_name = arm.name  # mcp server key == arm name
+            if server_cfg is not None:
+                cfg.mcp_servers = {server_name: server_cfg}
+                cfg.allowed_tools = list(DEFAULT_ALLOWED_TOOLS) + [f"mcp__{server_name}__*"]
+                if getattr(attach, "replace_tools", False):
+                    cfg.disallowed_tools = list(_REPLACE_TOOLS_DROP)
 
     # BaselineArm / TransformArm: client_base_url left None -> the worker points
     # Claude Code at the gateway directly (the control: model via Vertex, no
@@ -279,35 +308,11 @@ def build_arm_config(arm) -> _ArmConfig:
     return cfg
 
 
-def _explorer_agent_def(server_name: str) -> dict:
-    """An 'explorer' subagent the main agent can delegate repo discovery to.
-
-    Returned as the value for ClaudeAgentOptions.agents: a dict name->
-    AgentDefinition. Built lazily (the SDK class is imported only here) so this
-    module imports on a box without the SDK. Read-only tools + the arm's MCP
-    search tool, on the inherited model; description steers the main agent to
-    delegate broad searches to it (keeping the main transcript small).
-    """
-    from claude_agent_sdk import AgentDefinition  # lazy
-
-    return {
-        "explorer": AgentDefinition(
-            description=(
-                "Use to explore the repository and locate the code relevant to a "
-                "task: find files, definitions, call sites, and tests. Delegate "
-                "broad or multi-file searches here so the main agent's context "
-                "stays focused on the fix."
-            ),
-            prompt=(
-                "You are a read-only repository explorer. Search the codebase and "
-                "report back the files, symbols, and line ranges relevant to the "
-                "task. Do not edit files. Be concise: return paths and the minimal "
-                "snippets needed, not whole files."
-            ),
-            tools=["Read", "Glob", "Grep", "Bash", f"mcp__{server_name}__*"],
-            model="inherit",
-        ),
-    }
+# NB: a ToolArm's subagents are NOT defined here. A plugin-shaped arm (Woz) ships
+# its own subagents (e.g. the haiku `explore` in agents/explore.md) and they are
+# loaded via the plugin (build_arm_config sets cfg.plugins). We must not hand-roll
+# a same-model read-only "explorer" — that would measure an approximation of the
+# product, not the product. Bare/hosted-MCP arms get no synthesized subagent either.
 
 
 # ── the prompt the agent is given ─────────────────────────────────────────────
@@ -375,6 +380,7 @@ async def _run_sdk(
     env.pop("ANTHROPIC_API_KEY", None)
     env.update(env_overrides or {})
 
+    has_plugins = bool(arm_cfg.plugins)
     options = ClaudeAgentOptions(
         allowed_tools=arm_cfg.allowed_tools,
         disallowed_tools=arm_cfg.disallowed_tools,
@@ -383,12 +389,19 @@ async def _run_sdk(
         model=model,
         mcp_servers=arm_cfg.mcp_servers,
         agents=arm_cfg.agents or None,
+        # load a vendor's REAL plugin (Woz): its subagents/MCP/hooks/skills activate
+        # as shipped. None for every other arm.
+        plugins=arm_cfg.plugins or None,
         env=env,
         # headless: never block on a permission prompt — auto-accept tool use so
         # the agent runs unattended (this is a sandboxed per-task container).
         permission_mode="bypassPermissions",
-        # only our explicitly passed MCP servers; ignore any .mcp.json on disk.
-        strict_mcp_config=True,
+        # strict_mcp_config ignores .mcp.json AND plugin-provided MCP servers — so
+        # only enforce it when we are NOT loading a plugin (else Woz's `code` server
+        # would be suppressed and the agent would have no tools).
+        strict_mcp_config=not has_plugins,
+        # let the plugin's own hooks (session/cwd-inject/telemetry) fire.
+        include_hook_events=has_plugins,
     )
 
     messages: list[dict] = []

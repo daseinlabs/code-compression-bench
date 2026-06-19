@@ -1,12 +1,15 @@
-"""Woz arm — a ToolArm wrapping Woz's REAL Claude Code MCP server.
+"""Woz arm — a ToolArm that loads Woz's REAL Claude Code PLUGIN.
 
 WHAT WOZ IS (and why it's a ToolArm, not a proxy or transform)
 --------------------------------------------------------------
-Woz (WOZCODE) is a *paid* Claude Code plugin that ships an MCP (Model Context
-Protocol) server (``servers/code-server.js`` in github.com/WithWoz/wozcode-plugin,
-reported as MCP server ``code`` v0.3.82). It does NOT compress the model's prompt
-stream and it does NOT sit on the model endpoint. Instead it changes the agent's
-TOOLS: it replaces the generic shell-and-grep surface with a smaller, sharper set.
+Woz (WOZCODE) is a *paid* Claude Code plugin (github.com/WithWoz/wozcode-plugin,
+plugin name ``woz`` v0.3.82) that ships: a ``code`` MCP server
+(``servers/code-server.js``), its own subagents (``agents/code.md`` main +
+``agents/explore.md`` — a **haiku** explorer with Woz's Search/Sql tools and a
+terse Defs/Refs/Callers format), session hooks, and skills. It does NOT compress
+the model's prompt stream and it does NOT sit on the model endpoint. Instead it
+changes the agent's TOOLS: it replaces the generic shell-and-grep surface with a
+smaller, sharper set, and delegates exploration to its cheap haiku subagent.
 
 The real tool set (capitalized) is ``Search``, ``Edit``, ``Recall``, ``Sql`` —
 captured empirically from the live server's own ``tools/list`` (see
@@ -58,21 +61,25 @@ TOOL SURFACE itself:
     since the last Search, so re-greps after edits don't re-dump unchanged code.
   - SKELETONS — ``summary`` returns signatures/structure cheaply (TS/JS).
 The agent is *steered* to small, targeted reads, so the persistent window stays
-small — the indirect "sharper tools → smaller transcript" effect, confirmed at
-the schema level. That IS the ToolArm contract: we return the MCP server command
-to spawn (+ ``replace_tools``) and let the runner spawn it, discover its REAL
-tools via ``tools/list``, and wire them into the one fixed scaffold; the model
-endpoint is untouched.
+small — the indirect "sharper tools → smaller transcript" effect, plus the haiku
+``explore`` subagent doing scans off the main thread. That IS the ToolArm
+contract under Claude Code: we return the PLUGIN DIRECTORY (+ ``replace_tools``)
+and the runner loads the whole plugin via the SDK
+``plugins=[{"type":"local","path":WOZ_PLUGIN_DIR}]`` — so Claude Code activates
+Woz's OWN code/explore subagents, its ``code`` MCP server (tools as
+``mcp__plugin_woz_code__*``), hooks and skills, exactly as shipped. We do NOT
+spawn a bare server or reconstruct the explorer (that would measure an
+approximation, not Woz). The model endpoint is untouched.
 
 CLEAN-ROOM
 ----------
 This module contains NO proprietary logic and imports NOTHING from
-``adaptive_context``. It only *names* the MCP server command to launch, the env
-it needs, and the one-time login that authenticates it. The actual
-Search/Edit/Recall/Sql implementations live inside the Woz plugin on the other
-side of the MCP stdio pipe — we neither import nor reimplement them, and we do
-NOT hand-mirror their schemas: the runner discovers the live tool surface from
-the server's own ``tools/list`` at run time.
+``adaptive_context``. It only *names* the plugin DIRECTORY to load and runs the
+one-time login that authenticates it. The actual Search/Edit/Recall/Sql
+implementations + the subagents live inside the Woz plugin — we neither import
+nor reimplement them, and we do NOT hand-mirror their schemas or redefine their
+subagents: loading the plugin makes Claude Code surface the plugin's real tools
+(``mcp__plugin_woz_code__*``) and real agents directly.
 
 AUTH (a CLI login, NOT a server env var)
 ----------------------------------------
@@ -84,9 +91,9 @@ that stores a session under ``~/.claude/wozcode/``; the MCP server then serves
     <node> <WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js login --token "$WOZ_API_KEY"
         (with CLAUDE_PLUGIN_ROOT=<WOZ_PLUGIN_DIR> and node on PATH)
 
-``WozArm.setup()`` runs this ONCE before the server is used (idempotent: a fresh
-login simply refreshes the stored creds). The plugin's ``.mcp.json`` server env
-(cwd hook + telemetry) is still passed to the spawned server — but the API key
+``WozArm.setup()`` runs this ONCE before the run (idempotent: a fresh login simply
+refreshes the stored creds). When the plugin loads, Claude Code applies the
+plugin's OWN ``.mcp.json`` server env (cwd hook + telemetry); the API key
 authenticates via the login above, not via the server's environment.
 
 NODE >= 20.12 REQUIRED
@@ -101,20 +108,19 @@ crashes on import with::
 precise reason if older. Override the node binary with ``WOZ_NODE`` (woz_probe
 ships a portable node22 for exactly this).
 
-*** MAKE-OR-BREAK — UNRESOLVED, MUST BE SETTLED AT SMOKE *********************
-Woz's MCP server runs on the HOST runner, but the swebench task repo lives inside
-the per-task DOCKER CONTAINER. So ``Search`` (which greps the filesystem at its
-``cwd``) will NOT see the task repo unless one of these is arranged at smoke on
-the Linux box:
-  (a) Woz runs INSIDE the container (node + the plugin baked into the task
-      image), so the server's cwd IS the repo; or
-  (b) the task repo is copied/mounted to a HOST path that is passed to Search as
-      ``cwd`` (see WOZ_SEARCH_CWD in the runner's MCP dispatch).
-Until that is resolved, a host-spawned Woz server will grep the runner's working
-dir, not the task repo — i.e. it will find nothing relevant. DO NOT assume this
-works; it is an OPEN ITEM for smoke. (This same warning is repeated in
-bench/runner.py at the cwd-injection seam.)
-****************************************************************************
+REPO VISIBILITY (handled by the plugin's cwd hook — verify at smoke)
+--------------------------------------------------------------------
+We run the agent on the HOST against a host checkout of the task repo at its
+``base_commit`` (``AC_REPO_ROOT/<iid>``, provisioned by ``bench.prepare_repos``);
+the official Docker grader applies the produced patch separately, so the agent
+does NOT need to run inside the task container. The SDK ``cwd`` is that checkout,
+and the plugin's own cwd hook (``WOZCODE_MCP_CWD_HOOK_INJECTED`` in its .mcp.json)
+points Woz's ``Search``/``Sql`` at it. SMOKE MUST CONFIRM: (1) the plugin's
+``code`` MCP server actually starts under the SDK (its .mcp.json declares
+``command: node`` and relies on Woz's session hook to wire the entry/cwd), and
+(2) ``Search`` greps the task checkout, not the runner's dir. If the server fails
+to start, the run yields NO patch (native file tools are disallowed on purpose) —
+which surfaces the failure rather than silently measuring the native agent.
 
 Env:
   WOZ_API_KEY      — Woz account/license key (the website ``{refreshToken,
@@ -123,18 +129,13 @@ Env:
                      does not work). Passed to the login subprocess via env, never
                      argv, so it can't leak into process listings.
   WOZ_PLUGIN_DIR   — path to a clone of github.com/WithWoz/wozcode-plugin on the
-                     runner box (the ``${CLAUDE_PLUGIN_ROOT}``). The server file is
-                     ``<WOZ_PLUGIN_DIR>/servers/code-server.js`` and the login CLI
-                     is ``<WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js``.
-  WOZ_NODE         — (optional) a pinned node binary (>= 20.12) used for both the
-                     login and the server, e.g. woz_probe's portable node22. If
-                     unset, ``node`` from PATH is used (and version-checked).
-  WOZ_MCP_CMD      — (optional) operator override: a full shell-style command that
-                     launches the MCP stdio server, in case the plugin layout
-                     differs. If set it wins over the WOZ_PLUGIN_DIR default.
-  WOZ_SEARCH_CWD   — (read by the runner, not here) the path Woz's Search should
-                     grep. See bench/runner.py's MCP dispatch. Documented here so
-                     the whole Woz wiring is described in one place.
+                     runner box. The runner loads this WHOLE DIR as a plugin
+                     (``plugins=[{"type":"local","path":WOZ_PLUGIN_DIR}]``); the
+                     login CLI is ``<WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js``.
+  WOZ_NODE         — (optional) a pinned node binary (>= 20.12) used for the login,
+                     e.g. woz_probe's portable node22. If unset, ``node`` from PATH
+                     is used (and version-checked). Claude Code spawns the plugin's
+                     MCP server with the system ``node``, so that must be >= 20.12.
 """
 
 from __future__ import annotations
@@ -147,20 +148,13 @@ import subprocess
 from bench.arm import ToolArm, ToolAttach, register
 
 
-# ── env the plugin's .mcp.json sets on the server process ────────────────────
-# Reproduced verbatim from github.com/WithWoz/wozcode-plugin/.mcp.json so the
-# server behaves identically to a real Claude Code launch (the cwd hook + the
-# vendor's PostHog telemetry config). NOTE: the API key does NOT go here — the
-# server authenticates from the stored login session (see WozArm.setup()), not
-# from its environment. Forwarding the key here yields auth.login_required.
-_WOZ_SERVER_ENV: dict[str, str] = {
-    "WOZCODE_MCP_CWD_HOOK_INJECTED": "1",
-    "WOZCODE_POSTHOG_ENABLED": "true",
-    "WOZCODE_POSTHOG_PROJECT_TOKEN": "phc_F3mo2emdspgzD4QmFMQxHQfab1TyXgCAU7eYBakKq9k",
-    "WOZCODE_POSTHOG_PROJECT_REGION": "us",
-}
+# NB: the plugin's own ``.mcp.json`` carries the server env (the cwd hook +
+# PostHog telemetry) — when we load the whole plugin, Claude Code applies it. We
+# no longer reproduce it here (it would be dead config). The API key never goes in
+# the server env regardless: the server authenticates from the stored login
+# session (see WozArm.setup()); forwarding it yields auth.login_required.
 
-# node flag the plugin uses (suppress the ExperimentalWarning noise on stdout).
+# node flag used for the login subprocess (suppress ExperimentalWarning noise).
 _NODE_FLAGS = ["--no-warnings=ExperimentalWarning"]
 
 # Minimum Node the bundled server needs (it imports util.styleText, added in
@@ -173,12 +167,25 @@ def _node_exe() -> str:
     return os.environ.get("WOZ_NODE", "node")
 
 
-def _server_js() -> str | None:
-    """Path to ``servers/code-server.js`` under WOZ_PLUGIN_DIR, or None if unset."""
-    plugin_dir = os.environ.get("WOZ_PLUGIN_DIR")
-    if not plugin_dir:
-        return None
-    return os.path.join(plugin_dir, "servers", "code-server.js")
+def _plugin_dir() -> str | None:
+    """The Woz plugin root (WOZ_PLUGIN_DIR), or None if unset. This is what the
+    runner loads via the SDK ``plugins=[{"type":"local","path":...}]`` so Claude
+    Code activates Woz's OWN code/explore subagents, MCP server, hooks and skills."""
+    d = os.environ.get("WOZ_PLUGIN_DIR")
+    return d or None
+
+
+def _plugin_manifest() -> str | None:
+    """Path to ``.claude-plugin/plugin.json`` (the plugin marker), or None."""
+    d = _plugin_dir()
+    return os.path.join(d, ".claude-plugin", "plugin.json") if d else None
+
+
+def _explore_agent_md() -> str | None:
+    """Path to ``agents/explore.md`` — Woz's REAL haiku explorer (the thing we
+    must run, not approximate), or None if WOZ_PLUGIN_DIR is unset."""
+    d = _plugin_dir()
+    return os.path.join(d, "agents", "explore.md") if d else None
 
 
 def _login_cli() -> str | None:
@@ -210,69 +217,68 @@ class WozLoginError(RuntimeError):
 
 @register("woz")
 class WozArm(ToolArm):
-    """Attach Woz's REAL Claude Code MCP server as the agent's tool layer.
+    """Load Woz's REAL Claude Code plugin as the agent's tool layer.
 
-    Woz changes the agent's TOOLS (Search/Edit/Recall/Sql) rather than
-    compressing the prompt stream or proxying the model. The benefit is indirect:
-    a consolidated grep+read tool with output-size knobs steers the agent to
-    short, bounded tool calls → a smaller transcript. ToolArm is the right
-    pattern.
+    Woz changes the agent's TOOLS (Search/Edit/Recall/Sql) + delegates exploration
+    to its haiku ``explore`` subagent, rather than compressing the prompt stream or
+    proxying the model. The benefit is indirect: a consolidated grep+read tool with
+    output-size knobs + a cheap explorer steer the agent to short, bounded calls →
+    a smaller transcript. ToolArm is the right pattern; the runner loads the whole
+    plugin (cfg.plugins) so the shipped subagents/MCP/hooks/skills run as-is.
 
     Requires a Woz account key (WOZ_API_KEY), a resolvable node >= 20.12, and a
-    clone of the plugin (WOZ_PLUGIN_DIR) whose ``servers/code-server.js`` and
-    ``scripts/wozcode-cli.js`` exist. ``setup()`` performs the one-time CLI login
-    that the MCP server then authenticates against.
+    clone of the plugin (WOZ_PLUGIN_DIR) with ``.claude-plugin/plugin.json`` +
+    ``agents/explore.md``. ``setup()`` performs the one-time CLI login that the
+    plugin's MCP server then authenticates against.
     """
 
     name = "woz"
     needs = ["WOZ_API_KEY"]
 
     def ready(self) -> tuple[bool, str]:
-        """Ready iff WOZ_API_KEY is set AND the MCP server is actually runnable:
-        a resolvable node (>= 20.12) + a real server entrypoint on disk. So the
-        runner skips this arm cleanly (with a precise reason) when Woz isn't
-        installed / the node is too old, rather than crashing mid-run."""
+        """Ready iff WOZ_API_KEY is set AND the REAL plugin is present on disk
+        (``.claude-plugin/plugin.json`` + ``agents/explore.md``) AND node >= 20.12
+        resolves. The runner loads the whole plugin via the SDK, so what must exist
+        is the plugin tree (its subagents/MCP/hooks), not a server we spawn. Skips
+        cleanly with a precise reason when Woz isn't installed / node is too old."""
         ok, reason = super().ready()  # checks WOZ_API_KEY is set & non-empty
         if not ok:
             return ok, reason
-        cmd = self._mcp_server_cmd()
-        if cmd is None:
+        d = _plugin_dir()
+        if not d:
             return False, (
-                "Woz MCP server not configured. Set WOZ_PLUGIN_DIR to a clone of "
-                "github.com/WithWoz/wozcode-plugin (so "
-                "<WOZ_PLUGIN_DIR>/servers/code-server.js exists), or set WOZ_MCP_CMD "
-                "to the launch argv directly."
+                "WOZ_PLUGIN_DIR is not set. Clone the plugin on the runner box: "
+                "git clone https://github.com/WithWoz/wozcode-plugin, and point "
+                "WOZ_PLUGIN_DIR at it (the runner loads the whole plugin)."
             )
-        exe = cmd[0]
+        manifest = _plugin_manifest()
+        if not manifest or not os.path.exists(manifest):
+            return False, (
+                f"Not a Woz plugin dir: {manifest!r} missing. WOZ_PLUGIN_DIR must be a "
+                f"clone of github.com/WithWoz/wozcode-plugin (with .claude-plugin/plugin.json)."
+            )
+        explore = _explore_agent_md()
+        if not explore or not os.path.exists(explore):
+            return False, (
+                f"Woz's real explore subagent missing: {explore!r}. The plugin clone "
+                f"is incomplete (agents/explore.md is the haiku explorer we run)."
+            )
+        # Node >= 20.12 gate: the plugin's MCP server imports util.styleText (Node
+        # 20.12+); 20.11 crashes on import. Claude Code spawns the server with the
+        # system `node` (or WOZ_NODE). Only gate when we can read a version.
+        exe = _node_exe()
         if shutil.which(exe) is None and not os.path.exists(exe):
             return False, (
-                f"node launcher not found on PATH or disk: {exe!r} "
-                f"(install Node.js >= 20.12 on the runner box, or set WOZ_NODE)."
+                f"node not found on PATH or disk: {exe!r} (install Node.js >= 20.12 "
+                f"on the runner box, or set WOZ_NODE)."
             )
-        # Node >= 20.12 gate: the bundled server imports util.styleText (Node
-        # 20.12+); 20.11 crashes on import. Only gate when we can actually read a
-        # version (a resolvable node); if --version can't be parsed we don't block.
         ver = _node_version(exe)
         if ver is not None and ver[:2] < _MIN_NODE:
             return False, (
-                f"node {ver[0]}.{ver[1]}.{ver[2]} is too old for the Woz server "
+                f"node {ver[0]}.{ver[1]}.{ver[2]} is too old for the Woz plugin server "
                 f"(needs >= {_MIN_NODE[0]}.{_MIN_NODE[1]}: it imports util.styleText, "
-                f"added in Node 20.12; older node crashes on import with "
-                f"\"'node:util' does not provide an export named 'styleText'\"). "
-                f"Set WOZ_NODE to a pinned node >= 20.12 (woz_probe ships a portable "
-                f"node22)."
+                f"added in Node 20.12). Set WOZ_NODE to a node >= 20.12."
             )
-        # If we're using the WOZ_PLUGIN_DIR default (not a raw WOZ_MCP_CMD), the
-        # server file must exist — check it so a typo'd dir SKIPs with a reason.
-        if not os.environ.get("WOZ_MCP_CMD"):
-            js = _server_js()
-            if js is None:
-                return False, "WOZ_PLUGIN_DIR is not set (no plugin clone to launch)."
-            if not os.path.exists(js):
-                return False, (
-                    f"Woz server entrypoint missing: {js!r}. Clone the plugin: "
-                    f"git clone https://github.com/WithWoz/wozcode-plugin into WOZ_PLUGIN_DIR."
-                )
         return True, "ok"
 
     def setup(self) -> None:
@@ -297,11 +303,6 @@ class WozArm(ToolArm):
         if not api_key:
             # ready() already gates on this; defensive only.
             raise WozLoginError("WOZ_API_KEY is not set; cannot perform Woz login.")
-
-        # WOZ_MCP_CMD operators own their own auth (custom launch); skip the
-        # default CLI login so we don't assume a plugin layout that may not exist.
-        if os.environ.get("WOZ_MCP_CMD"):
-            return
 
         cli = _login_cli()
         if cli is None:
@@ -348,43 +349,26 @@ class WozArm(ToolArm):
         # log; no secret in the output.)
         print(f"  woz: login ok -> {(proc.stdout or '').strip()[-160:]}", flush=True)
 
-    def _mcp_server_cmd(self) -> list[str] | None:
-        """Resolve the argv that launches the Woz MCP stdio server.
-
-        Precedence:
-          1. WOZ_MCP_CMD (operator override) — split a shell-style string to argv.
-          2. WOZ_PLUGIN_DIR default — reproduce the plugin's .mcp.json command:
-             ``node --no-warnings=ExperimentalWarning <DIR>/servers/code-server.js``.
-          3. Neither configured -> None ("not configured"), so ready() reports it
-             cleanly rather than the runner spawning a bogus process.
-
-        WOZ_API_KEY is NEVER placed here — it authenticates via the stored login
-        session (see setup()), not via the server command or environment.
-        """
-        override = os.environ.get("WOZ_MCP_CMD")
-        if override:
-            return override.split()
-        js = _server_js()
-        if js is None:
-            return None
-        return [_node_exe(), *_NODE_FLAGS, js]
-
     def attach(self) -> ToolAttach:
-        """Return the MCP server to spawn + the replace-tools contract.
+        """Load Woz's REAL plugin (not a hand-spawned server).
 
-        The REAL tools (Search/Edit/Recall/Sql) come from the live ``tools/list``
-        the runner issues after the handshake — we do NOT hardcode mirrored
-        schemas (``tools=[]``). ``replace_tools=True``: Woz REPLACES the scaffold's
-        bash tool with its own set; that replacement IS the arm.
+        The runner loads ``WOZ_PLUGIN_DIR`` via the SDK
+        ``plugins=[{"type":"local","path":...}]``, so Claude Code activates Woz's
+        OWN definitions as shipped: the ``code`` main agent, the **haiku**
+        ``explore`` subagent (its Search/Sql tools + terse Defs/Refs/Callers
+        format), the ``code`` MCP server (tools as ``mcp__plugin_woz_code__*``,
+        with the plugin's .mcp.json env + cwd hook), its session hooks, and skills.
+        We deliberately do NOT spawn a bare server or redefine the explorer — that
+        would measure an approximation, not Woz.
 
-        The server env carries ONLY the plugin's .mcp.json config (cwd hook +
-        telemetry). The API key is NOT here — the server authenticates from the
-        login session ``setup()`` established (forwarding the key as a server env
-        var yields ``auth.login_required``).
+        ``replace_tools=True`` makes the runner drop the native file surface on the
+        main thread (faithful to Woz's ``agents/code.md``, which disallows
+        Read/Edit/Write/Grep/Glob), so the run genuinely works THROUGH Woz's tools.
+        The API key authenticates via the login session ``setup()`` established (the
+        plugin's MCP server reads it); it is never placed in argv or env here.
         """
         return ToolAttach(
-            tools=[],  # discovery-driven: no hand-mirrored schemas
-            mcp_server_cmd=self._mcp_server_cmd(),
+            plugin_dir=_plugin_dir(),
+            plugin_tool_globs=["mcp__plugin_woz_code__*"],
             replace_tools=True,
-            server_env=dict(_WOZ_SERVER_ENV),
         )
