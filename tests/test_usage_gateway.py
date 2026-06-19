@@ -17,10 +17,13 @@ Two layers of coverage, both pure-Python (no claude_agent_sdk, no node):
     the right CallUsage row to the per-run JSONL.
 
 The Vertex-mode tests inject a fake completion_fn (standing in for the native
-AnthropicVertex client) returning a Message-like object, so the suite runs on a
-box WITHOUT the ``anthropic`` SDK installed — including the regression that a
-conversation carrying a tool_result message + tools round-trips natively (JSON
-and SSE) with the tool_use ``input`` a parsed OBJECT and the cache split captured.
+AnthropicVertex client called with ``stream=True``) returning an iterable of plain
+event DICTS that mimic the SDK's native Anthropic stream events, so the suite runs
+on a box WITHOUT the ``anthropic`` SDK installed — including the regression that a
+conversation carrying a tool_result message + tools round-trips natively (the
+relayed body is native SSE for a streaming client; a reconstructed JSON message for
+a non-streaming client) with the tool_use ``input`` a parsed OBJECT and the cache
+split captured.
 
 Runnable two ways:
     py -m pytest tests/test_usage_gateway.py -q
@@ -47,8 +50,8 @@ if str(_ROOT) not in sys.path:
 
 from bench.usage_gateway import (  # noqa: E402
     MODE_PASSTHROUGH, RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
-    _anthropic_create_kwargs, _strip_vertex_prefix, _message_to_anthropic_dict,
-    anthropic_message_to_sse,
+    _anthropic_create_kwargs, _strip_vertex_prefix,
+    _accumulate_anthropic_message, _event_type, _event_data,
 )
 
 
@@ -235,51 +238,61 @@ def test_gateway_logs_usage_sse_path():
     _through_gateway(stream=True)
 
 
-# ── 4. Vertex mode: mocked AnthropicVertex completion (native passthrough) ────
-# The default completion_fn is now an AnthropicVertex client returning a native
-# pydantic Message; tests inject a fake returning a Message-LIKE object (dict or
-# namespace) whose usage carries the cache split EXACTLY as Anthropic reports it:
-# input_tokens is the UNCACHED count (120), the cache split is separate (write
-# 800, read 5000). No OpenAI-shape, no private-attr recovery — pure passthrough.
-def _fake_usage():
-    """Anthropic-native usage: input_tokens is already the UNCACHED portion."""
-    return SimpleNamespace(
-        input_tokens=120, output_tokens=45,
-        cache_creation_input_tokens=800, cache_read_input_tokens=5000,
-    )
+# ── 4. Vertex mode: mocked AnthropicVertex STREAM (native passthrough) ────────
+# The default completion_fn now calls AnthropicVertex with stream=True and returns
+# the native event iterator; tests inject a fake returning an iterable of plain
+# event DICTS that mimic the SDK's events. message_start.message.usage carries the
+# cache split EXACTLY as Anthropic reports it: input_tokens is the UNCACHED count
+# (120), the cache split is separate (write 800, read 5000); message_delta carries
+# the running output_tokens (45). No OpenAI-shape, no translation — pure passthrough.
+_START_USAGE = {
+    "input_tokens": 120, "output_tokens": 1,
+    "cache_creation_input_tokens": 800, "cache_read_input_tokens": 5000,
+}
+_DELTA_USAGE = {"output_tokens": 45}
 
 
-def _fake_message():
-    """A Message-like object with a text reply + the Anthropic cache split.
+def _event_dict(etype, **rest):
+    """A plain event dict mimicking an SDK stream event's ``.model_dump()`` — it
+    carries a top-level ``"type"`` key (the SDK's dump does too)."""
+    d = {"type": etype}
+    d.update(rest)
+    return d
 
-    Mirrors what AnthropicVertex's ``client.messages.create(...)`` returns: native
-    Anthropic ``content`` blocks (a TextBlock-like namespace) and a usage object
-    with the cache split. No ``model_dump`` — exercises the attribute-read path of
-    ``_message_to_anthropic_dict``.
+
+def _fake_event_stream(model="claude-sonnet-4-6", *, tool=False):
+    """Yield plain event DICTS that mimic the AnthropicVertex stream=True events.
+
+    A text reply (``done``) by default, or a tool_use block emitted via a
+    content_block_start{type:tool_use,id,name} + input_json_delta + content_block_stop
+    when ``tool=True`` (the regression shape: the model's tool call must survive as
+    a well-formed tool_use whose ``input`` parses back to the OBJECT). The cache
+    split rides on message_start.message.usage; output_tokens on message_delta.
     """
-    text_block = SimpleNamespace(type="text", text="done")
-    return SimpleNamespace(
-        id="msg_vtx_x", type="message", role="assistant",
-        model="claude-sonnet-4-6", content=[text_block],
-        stop_reason="end_turn", stop_sequence=None, usage=_fake_usage(),
-    )
-
-
-def _fake_toolcall_message():
-    """A Message-like object whose content is a native Anthropic tool_use block —
-    ``input`` is already a parsed OBJECT (the native SDK never returns a JSON
-    string). The gateway must round-trip it as a well-formed tool_use whose input
-    stays an object; getting this wrong is what made Claude Code report "the
-    model's tool call could not be parsed" and fail the whole run."""
-    tool_block = SimpleNamespace(
-        type="tool_use", id="toolu_abc", name="Bash",
-        input={"command": "ls -la", "timeout": 5},
-    )
-    return SimpleNamespace(
-        id="msg_vtx_tool", type="message", role="assistant",
-        model="claude-sonnet-4-6", content=[tool_block],
-        stop_reason="tool_use", stop_sequence=None, usage=_fake_usage(),
-    )
+    yield _event_dict("message_start", message={
+        "id": "msg_vtx_x", "type": "message", "role": "assistant", "model": model,
+        "content": [], "stop_reason": None, "stop_sequence": None,
+        "usage": dict(_START_USAGE),
+    })
+    if tool:
+        yield _event_dict("content_block_start", index=0, content_block={
+            "type": "tool_use", "id": "toolu_abc", "name": "Bash", "input": {}})
+        yield _event_dict("content_block_delta", index=0, delta={
+            "type": "input_json_delta",
+            "partial_json": json.dumps({"command": "ls -la", "timeout": 5})})
+        yield _event_dict("content_block_stop", index=0)
+        stop_reason = "tool_use"
+    else:
+        yield _event_dict("content_block_start", index=0, content_block={
+            "type": "text", "text": ""})
+        yield _event_dict("content_block_delta", index=0, delta={
+            "type": "text_delta", "text": "done"})
+        yield _event_dict("content_block_stop", index=0)
+        stop_reason = "end_turn"
+    yield _event_dict("message_delta",
+                      delta={"stop_reason": stop_reason, "stop_sequence": None},
+                      usage=dict(_DELTA_USAGE))
+    yield _event_dict("message_stop")
 
 
 def _parse_sse_blocks(sse_text: str):
@@ -349,16 +362,34 @@ def test_anthropic_create_kwargs_defaults_max_tokens():
     assert kw["messages"] == [{"role": "user", "content": "hi"}]
 
 
-def test_message_to_anthropic_dict_cache_split():
-    """A returned Message converts to the Anthropic response dict + usage cache split."""
-    anth = _message_to_anthropic_dict(_fake_message(), "claude-sonnet-4-6")
+def test_event_helpers_accept_dicts_and_objects():
+    """_event_type / _event_data work on plain dicts AND SDK-like objects, and the
+    data dict always carries a ``"type"`` key (set from the event type if missing)."""
+    # plain dict (what the fake stream yields)
+    d = _event_dict("message_stop")
+    assert _event_type(d) == "message_stop"
+    assert _event_data(d) == {"type": "message_stop"}
+    # an SDK-like object: .type + .model_dump() (dump lacks "type" -> we add it)
+    obj = SimpleNamespace(type="message_stop", model_dump=lambda: {"foo": "bar"})
+    assert _event_type(obj) == "message_stop"
+    data = _event_data(obj)
+    assert data["foo"] == "bar"
+    assert data["type"] == "message_stop"      # injected from _event_type
+
+
+def test_accumulate_anthropic_message_text_cache_split():
+    """Accumulating a native event stream reconstructs the Anthropic message dict +
+    usage cache split (for the NON-streaming client path)."""
+    ev_dicts = [(_event_type(e), _event_data(e))
+                for e in _fake_event_stream("claude-sonnet-4-6")]
+    anth = _accumulate_anthropic_message(ev_dicts, "claude-sonnet-4-6")
     assert anth["type"] == "message"
     assert anth["role"] == "assistant"
     assert anth["model"] == "claude-sonnet-4-6"
     assert anth["stop_reason"] == "end_turn"
     assert anth["content"] == [{"type": "text", "text": "done"}]
     # usage is a PLAIN dict; native input_tokens is the UNCACHED count (120), kept
-    # as-is (NOT re-derived); the cache split is separate.
+    # as-is (NOT re-derived); the cache split is separate; output_tokens from delta.
     u = anth["usage"]
     assert isinstance(u, dict)
     assert u["input_tokens"] == 120
@@ -369,19 +400,33 @@ def test_message_to_anthropic_dict_cache_split():
     _assert_row(extract_usage(u))
 
 
-def test_message_to_anthropic_dict_accepts_plain_dict():
-    """A dict Message-like (e.g. a model_dump or a raw fake) round-trips too,
-    coercing a missing cache split to 0 and parsing a string tool_use input."""
-    d = {
-        "id": "msg_d", "type": "message", "role": "assistant",
-        "content": [{"type": "tool_use", "id": "toolu_x", "name": "Edit",
-                     "input": '{"path": "a.py"}'}],   # a STRING input — must parse
-        "stop_reason": "tool_use",
-        "usage": {"input_tokens": 50, "output_tokens": 3},  # no cache split reported
-    }
-    anth = _message_to_anthropic_dict(d, "claude-sonnet-4-6")
+def test_accumulate_anthropic_message_tool_use_input_is_object():
+    """A tool_use stream accumulates into a block whose ``input`` is a PARSED OBJECT
+    (the partial_json fragments are buffered then json.loads'd at content_block_stop),
+    and a missing cache split coerces to 0."""
+    # build a tool stream whose message_start reports no cache split, to also check
+    # the None -> 0 coercion.
+    def _stream():
+        yield _event_dict("message_start", message={
+            "id": "msg_d", "type": "message", "role": "assistant",
+            "usage": {"input_tokens": 50, "output_tokens": 1}})  # no cache split
+        yield _event_dict("content_block_start", index=0, content_block={
+            "type": "tool_use", "id": "toolu_x", "name": "Edit", "input": {}})
+        # input arrives as TWO partial_json fragments — must concatenate then parse
+        yield _event_dict("content_block_delta", index=0, delta={
+            "type": "input_json_delta", "partial_json": '{"path":'})
+        yield _event_dict("content_block_delta", index=0, delta={
+            "type": "input_json_delta", "partial_json": ' "a.py"}'})
+        yield _event_dict("content_block_stop", index=0)
+        yield _event_dict("message_delta",
+                          delta={"stop_reason": "tool_use"}, usage={"output_tokens": 3})
+        yield _event_dict("message_stop")
+
+    ev_dicts = [(_event_type(e), _event_data(e)) for e in _stream()]
+    anth = _accumulate_anthropic_message(ev_dicts, "claude-sonnet-4-6")
     tu = [b for b in anth["content"] if b["type"] == "tool_use"]
     assert tu[0]["input"] == {"path": "a.py"}        # parsed object, not a string
+    assert anth["stop_reason"] == "tool_use"
     assert anth["usage"]["cache_creation_input_tokens"] == 0   # None -> 0
     assert anth["usage"]["cache_read_input_tokens"] == 0
 
@@ -389,18 +434,19 @@ def test_message_to_anthropic_dict_accepts_plain_dict():
 def _through_vertex_gateway(stream: bool):
     """A request through a Vertex-mode gateway with a MOCKED completion_fn.
 
-    The injected completion_fn stands in for the native AnthropicVertex client and
-    returns a Message-like object. Asserts the gateway (a) called it with native
-    create kwargs (bare model id, no foreign routing args, no ``stream``) and (b)
-    relayed an Anthropic-format response + wrote the right CallUsage row (cache
-    split) to the per-run JSONL — for BOTH the JSON and SSE paths.
+    The injected completion_fn stands in for the native AnthropicVertex client
+    called with ``stream=True`` and returns an iterable of native event dicts.
+    Asserts the gateway (a) called it with native create kwargs (bare model id, no
+    foreign routing args, no ``stream``) and (b) relayed the native events VERBATIM
+    as SSE (streaming client) or a reconstructed JSON message (non-streaming
+    client), and wrote the right CallUsage row (cache split) to the per-run JSONL.
     """
     tmp = tempfile.mkdtemp(prefix="ccb_gw_vtx_")
     seen = {}
 
-    def fake_completion(kwargs):
-        seen["kwargs"] = kwargs            # capture the native create kwargs
-        return _fake_message()             # a native Message-like reply
+    def fake_completion(create_kwargs):
+        seen["kwargs"] = create_kwargs       # capture the native create kwargs
+        return _fake_event_stream()          # native Anthropic stream events
 
     gw = UsageGateway(log_dir=tmp, default_run_id="rid-v",
                       completion_fn=fake_completion).start()  # mode defaults to vertex
@@ -418,14 +464,14 @@ def _through_vertex_gateway(stream: bool):
         relayed = resp.read()
         # (a) the mocked completion got native create kwargs: the BARE configured
         # Vertex model (the leading 'vertex_ai/' stripped), no foreign routing args,
-        # and NO ``stream`` (the gateway buffers + re-emits SSE itself — so tool
-        # calls translate correctly off the complete message).
+        # and NO ``stream`` in the kwargs (the completion_fn adds stream=True itself).
         kw = seen["kwargs"]
         assert kw["model"] == "claude-sonnet-4-6"   # bare id, not the client's model
         assert "vertex_ai/" not in kw["model"]
         assert "stream" not in kw
         assert "vertex_project" not in kw and "vertex_location" not in kw
-        # (a') the gateway emitted Anthropic format (JSON message OR SSE events)
+        # (a') the gateway emitted Anthropic format: native SSE events relayed
+        # verbatim (streaming client) OR a reconstructed JSON message.
         if stream:
             assert resp.headers.get("Content-Type", "").startswith("text/event-stream")
             blocks = _parse_sse_blocks(relayed.decode())
@@ -461,23 +507,22 @@ def test_vertex_gateway_sse_round_trip():
     _through_vertex_gateway(stream=True)
 
 
-def test_vertex_tool_call_survives_json_and_sse():
-    """A model TOOL CALL must round-trip as a well-formed Anthropic tool_use with a
-    PARSED input object — both as JSON and over SSE. Regression: the old litellm
+def test_vertex_tool_call_survives_native_events():
+    """A model TOOL CALL must survive the native passthrough as a well-formed
+    Anthropic tool_use with a PARSED input object. Regression: the old litellm
     streaming path dropped tool calls -> Claude Code reported 'the model's tool
     call could not be parsed' -> the whole run failed (the A0 smoke caught exactly
-    this). The native passthrough preserves the tool_use block + its parsed input."""
-    # (a) the native Message converts to a tool_use block whose input stays an OBJECT
-    anth = _message_to_anthropic_dict(
-        _fake_toolcall_message(), "claude-sonnet-4-6")
-    tu = [b for b in anth["content"] if b["type"] == "tool_use"]
-    assert len(tu) == 1
-    assert tu[0]["name"] == "Bash" and tu[0]["id"] == "toolu_abc"
-    assert tu[0]["input"] == {"command": "ls -la", "timeout": 5}   # parsed, NOT a string
-    assert anth["stop_reason"] == "tool_use"
-    # (b) SSE re-emission: tool_use content_block_start carries id+name, and the
-    # input rides as an input_json_delta partial_json that parses back to the object
-    blocks = _parse_sse_blocks(b"".join(anthropic_message_to_sse(anth)).decode())
+    this). The native streaming passthrough relays the tool_use events verbatim;
+    the JSON path reconstructs the block off those same events."""
+    events = list(_fake_event_stream("claude-sonnet-4-6", tool=True))
+    ev_dicts = [(_event_type(e), _event_data(e)) for e in events]
+
+    # (a) the native event stream relayed VERBATIM as SSE keeps the tool_use shape:
+    # content_block_start carries id+name, and the input rides as an input_json_delta
+    # partial_json that parses back to the OBJECT.
+    from bench.usage_gateway import _sse_event
+    frames = b"".join(_sse_event(t, d) for (t, d) in ev_dicts)
+    blocks = _parse_sse_blocks(frames.decode())
     tu_start = [d for e, d in blocks
                 if e == "content_block_start" and d["content_block"]["type"] == "tool_use"]
     assert len(tu_start) == 1
@@ -487,6 +532,15 @@ def test_vertex_tool_call_survives_json_and_sse():
            if e == "content_block_delta" and d.get("delta", {}).get("type") == "input_json_delta"]
     assert len(ijd) == 1
     assert json.loads(ijd[0]["delta"]["partial_json"]) == {"command": "ls -la", "timeout": 5}
+
+    # (b) the NON-stream client path reconstructs a tool_use block whose input is a
+    # PARSED OBJECT (NOT a string) off those same events.
+    anth = _accumulate_anthropic_message(ev_dicts, "claude-sonnet-4-6")
+    tu = [b for b in anth["content"] if b["type"] == "tool_use"]
+    assert len(tu) == 1
+    assert tu[0]["name"] == "Bash" and tu[0]["id"] == "toolu_abc"
+    assert tu[0]["input"] == {"command": "ls -la", "timeout": 5}   # parsed, NOT a string
+    assert anth["stop_reason"] == "tool_use"
 
 
 def _tool_result_conversation_through_gateway(stream: bool):
@@ -503,9 +557,9 @@ def _tool_result_conversation_through_gateway(stream: bool):
     tmp = tempfile.mkdtemp(prefix="ccb_gw_tr_")
     seen = {}
 
-    def fake_completion(kwargs):
-        seen["kwargs"] = kwargs
-        return _fake_toolcall_message()    # model answers with a tool_use
+    def fake_completion(create_kwargs):
+        seen["kwargs"] = create_kwargs
+        return _fake_event_stream(tool=True)   # model answers with a tool_use
 
     gw = UsageGateway(log_dir=tmp, default_run_id="rid-tr",
                       completion_fn=fake_completion).start()

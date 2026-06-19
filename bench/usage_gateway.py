@@ -20,20 +20,29 @@ the prompt above us.
 
 TWO UPSTREAM MODES (env/arg ``CCB_GATEWAY_MODE``; default ``vertex``)
 --------------------------------------------------------------------
-  * ``vertex``      — the gateway IS the Vertex bridge, a NATIVE passthrough. It
-                      receives Anthropic ``/v1/messages`` (+
-                      ``/v1/messages/count_tokens``) and forwards the request
-                      NATIVELY via the ``anthropic`` SDK's ``AnthropicVertex``
-                      client (``client.messages.create(model="claude-sonnet-4-6",
-                      ...)``) with ADC auth (no API key). The inbound request IS
-                      already Anthropic Messages format and the target IS
+  * ``vertex``      — the gateway IS the Vertex bridge, a NATIVE STREAMING
+                      passthrough (relays Anthropic events verbatim). It receives
+                      Anthropic ``/v1/messages`` (+ ``/v1/messages/count_tokens``)
+                      and forwards the request NATIVELY via the ``anthropic`` SDK's
+                      ``AnthropicVertex`` client, calling
+                      ``client.messages.create(model="claude-sonnet-4-6", ...,
+                      stream=True)`` with ADC auth (no API key). The inbound request
+                      IS already Anthropic Messages format and the target IS
                       Anthropic-on-Vertex, so this is a pure passthrough — the
                       recognized native fields (messages/system/tools/tool_choice/
-                      thinking/…) ride through untouched, and the returned Message
-                      becomes an Anthropic Messages response (JSON or SSE). This is
-                      the seam that lets the WHOLE chain speak Anthropic (Claude
-                      Code and the vendor proxies only speak the Anthropic API)
-                      while the real model runs claude-sonnet on Vertex via ADC.
+                      thinking/…) ride through untouched, and the stream events the
+                      SDK yields ARE native Anthropic SSE events (message_start,
+                      content_block_*, message_delta, message_stop). We relay those
+                      events VERBATIM — zero translation, which kills the whole class
+                      of tool-call / shape bugs we hit. This is the seam that lets
+                      the WHOLE chain speak Anthropic (Claude Code and the vendor
+                      proxies only speak the Anthropic API) while the real model runs
+                      claude-sonnet on Vertex via ADC.
+                      (Why ``stream=True``: Claude Code sends a large ``max_tokens``,
+                      and the anthropic SDK then REFUSES a non-streaming call with
+                      ``ValueError: Streaming is required for operations that may
+                      take longer than 10 minutes``. Iterating a streaming response
+                      avoids that guard entirely.)
                       (The old litellm <-> OpenAI translation layer is gone: it
                       dropped tool_calls -> "the model's tool call could not be
                       parsed", and rejected Anthropic-native messages -> "Invalid
@@ -73,7 +82,7 @@ CLEAN-ROOM
 The module itself is pure stdlib (``http.server``, ``urllib``, ``json``,
 ``threading``). It has NO ``adaptive_context`` import. The ONE heavy dependency —
 the ``anthropic`` SDK (``AnthropicVertex``) — is imported LAZILY, only when the
-default Vertex completion_fn first runs, so ``import bench.usage_gateway`` /
+default Vertex completion_fn first builds its client, so ``import bench.usage_gateway`` /
 ``import bench.cc_runner``, the tests, and the passthrough mode all work on a box
 without ``anthropic`` installed. ``bench.schema`` is imported only for the
 ``CallUsage`` TypedDict shape (stdlib dataclasses/typing).
@@ -268,73 +277,138 @@ def _anthropic_create_kwargs(body: dict, model: str) -> dict:
     return kwargs
 
 
-def _message_to_anthropic_dict(msg: Any, model: str) -> dict:
-    """Convert an ``AnthropicVertex`` Message -> an Anthropic Messages response dict.
+def _sse_event(event: str, data: dict) -> bytes:
+    """One Anthropic-style SSE event frame: ``event: <e>\\ndata: <json>\\n\\n``."""
+    return (f"event: {event}\n"
+            f"data: {json.dumps(data, separators=(',', ':'))}\n\n").encode("utf-8")
 
-    The native ``client.messages.create(...)`` returns a pydantic ``Message`` whose
-    shape already IS the Anthropic Messages response — so this is mostly a dump.
-    Accepts a pydantic Message (``model_dump()``), a plain dict (a test fake), or
-    an attribute-bearing namespace. Guarantees the keys the rest of the gateway
-    relies on: id, type, role, model, content (text + tool_use blocks with a
-    PARSED ``input`` object), stop_reason, stop_sequence, and a ``usage`` PLAIN
-    DICT (cache split included). The native ``input_tokens`` is ALREADY the
-    UNCACHED count (cache split separate) — keep them as-is; do NOT re-derive.
+
+# ── native stream-event helpers (SDK objects OR plain dicts, for tests) ───────
+def _event_type(e: Any) -> Optional[str]:
+    """The SSE event name. Accepts an SDK event object (``e.type``) or a plain dict
+    (``e["type"]``) so tests can pass dicts that mimic the SDK without ``anthropic``.
     """
-    # 1) get a plain dict view of the message (pydantic -> dict -> attrs)
-    if hasattr(msg, "model_dump"):
-        d = msg.model_dump()
-    elif isinstance(msg, dict):
-        d = msg
+    t = getattr(e, "type", None)
+    if t is not None:
+        return t
+    if isinstance(e, dict):
+        return e.get("type")
+    return None
+
+
+def _event_data(e: Any) -> dict:
+    """The SSE ``data`` dict for an event — the JSON payload relayed verbatim.
+
+    An SDK event has ``model_dump()`` whose output already carries a ``"type"`` key
+    (e.g. message_start dumps to ``{"type":"message_start","message":{...}}``).
+    A plain dict (a test fake) is used as-is. Either way we ensure the dict carries
+    a ``"type"`` key (set from ``_event_type`` if missing) so ``usage_from_sse``
+    and any downstream consumer see the native event shape.
+    """
+    if hasattr(e, "model_dump"):
+        d = e.model_dump()
+    elif isinstance(e, dict):
+        d = dict(e)
     else:
-        d = {
-            "id": getattr(msg, "id", None),
-            "type": getattr(msg, "type", "message"),
-            "role": getattr(msg, "role", "assistant"),
-            "model": getattr(msg, "model", None),
-            "content": getattr(msg, "content", []),
-            "stop_reason": getattr(msg, "stop_reason", None),
-            "stop_sequence": getattr(msg, "stop_sequence", None),
-            "usage": getattr(msg, "usage", {}),
-        }
+        d = {}
+    if "type" not in d:
+        t = _event_type(e)
+        if t is not None:
+            d["type"] = t
+    return d
 
-    # 2) normalize content blocks (each may be a dict, pydantic block, or namespace)
-    blocks: list = []
-    for blk in (d.get("content") or []):
-        if hasattr(blk, "model_dump"):
-            blk = blk.model_dump()
 
-        def _bg(obj: Any, key: str, default=None):
-            if isinstance(obj, dict):
-                return obj.get(key, default)
-            return getattr(obj, key, default)
-        btype = _bg(blk, "type")
-        if btype == "text":
-            blocks.append({"type": "text", "text": _bg(blk, "text") or ""})
-        elif btype == "tool_use":
-            tool_input = _bg(blk, "input")
-            if isinstance(tool_input, str):
+def _accumulate_anthropic_message(ev_dicts: list, model: str) -> dict:
+    """Reconstruct a COMPLETE Anthropic message dict from a native event list.
+
+    ``ev_dicts`` is the buffered ``[(type, data), ...]`` from one streamed response.
+    Used ONLY for a NON-streaming client (the streaming client relays the native
+    event frames verbatim — no reconstruction). We walk the events the way any SSE
+    client would:
+
+      * ``message_start.message`` -> id / role / model / usage (the input side,
+        incl. the cache split; native ``input_tokens`` is the UNCACHED count, kept
+        as-is — NOT re-derived);
+      * ``content_block_start`` opens a block (text accumulates ``text_delta``;
+        tool_use buffers ``input_json_delta`` ``partial_json`` then ``json.loads``
+        it into the tool_use ``input`` OBJECT at ``content_block_stop``);
+      * ``message_delta`` -> ``stop_reason`` (+ merges its ``output_tokens`` /
+        cache echo into usage).
+
+    Returns the Anthropic Messages response dict the JSON relay sends:
+    {id, type:"message", role:"assistant", model, content, stop_reason,
+     stop_sequence, usage(plain dict, cache split, None->0)}.
+    """
+    msg_id = "msg_vertex"
+    role = "assistant"
+    stop_reason: Optional[str] = None
+    stop_sequence = None
+    raw_usage: dict = {}
+    # block accumulators, keyed by content-block index
+    blocks: dict = {}            # index -> partial block dict
+    order: list = []             # index order, as opened
+    json_buf: dict = {}          # index -> accumulated partial_json string (tool_use)
+
+    for (etype, data) in ev_dicts:
+        if etype == "message_start":
+            m = (data.get("message") or {}) if isinstance(data, dict) else {}
+            msg_id = m.get("id") or msg_id
+            role = m.get("role") or role
+            u = m.get("usage")
+            if isinstance(u, dict):
+                raw_usage.update(u)
+        elif etype == "content_block_start":
+            idx = data.get("index", len(order))
+            cb = (data.get("content_block") or {}) if isinstance(data, dict) else {}
+            btype = cb.get("type")
+            if btype == "text":
+                blk = {"type": "text", "text": cb.get("text") or ""}
+            elif btype == "tool_use":
+                blk = {"type": "tool_use", "id": cb.get("id") or "toolu_unknown",
+                       "name": cb.get("name") or "tool", "input": {}}
+                json_buf[idx] = ""
+            else:
+                blk = {"type": btype or "text", "text": ""}
+            blocks[idx] = blk
+            order.append(idx)
+        elif etype == "content_block_delta":
+            idx = data.get("index", 0)
+            delta = (data.get("delta") or {}) if isinstance(data, dict) else {}
+            dtype = delta.get("type")
+            blk = blocks.get(idx)
+            if blk is None:
+                continue
+            if dtype == "text_delta":
+                blk["text"] = (blk.get("text") or "") + (delta.get("text") or "")
+            elif dtype == "input_json_delta":
+                json_buf[idx] = json_buf.get(idx, "") + (delta.get("partial_json") or "")
+        elif etype == "content_block_stop":
+            idx = data.get("index", 0)
+            blk = blocks.get(idx)
+            if blk is not None and blk.get("type") == "tool_use":
+                raw = json_buf.get(idx, "")
                 try:
-                    tool_input = json.loads(tool_input)
+                    parsed = json.loads(raw) if raw else {}
                 except (ValueError, TypeError):
-                    tool_input = {}
-            blocks.append({
-                "type": "tool_use",
-                "id": _bg(blk, "id") or "toolu_unknown",
-                "name": _bg(blk, "name") or "tool",
-                "input": tool_input if isinstance(tool_input, dict) else {},
-            })
+                    parsed = {}
+                blk["input"] = parsed if isinstance(parsed, dict) else {}
+        elif etype == "message_delta":
+            delta = (data.get("delta") or {}) if isinstance(data, dict) else {}
+            if delta.get("stop_reason") is not None:
+                stop_reason = delta.get("stop_reason")
+            if delta.get("stop_sequence") is not None:
+                stop_sequence = delta.get("stop_sequence")
+            u = data.get("usage") if isinstance(data, dict) else None
+            if isinstance(u, dict):
+                for k in ("output_tokens", "input_tokens",
+                          "cache_creation_input_tokens", "cache_read_input_tokens"):
+                    if u.get(k) is not None:
+                        raw_usage[k] = u[k]
 
-    # 3) usage -> PLAIN dict; native input_tokens is already the UNCACHED count.
-    raw_usage = d.get("usage") or {}
-    if hasattr(raw_usage, "model_dump"):
-        raw_usage = raw_usage.model_dump()
+    content = [blocks[i] for i in order]
 
     def _ug(key: str) -> int:
-        if isinstance(raw_usage, dict):
-            v = raw_usage.get(key)
-        else:
-            v = getattr(raw_usage, key, None)
-        return int(v or 0)
+        return int(raw_usage.get(key) or 0)
 
     usage = {
         "input_tokens": _ug("input_tokens"),
@@ -344,95 +418,15 @@ def _message_to_anthropic_dict(msg: Any, model: str) -> dict:
     }
 
     return {
-        "id": d.get("id") or "msg_vertex",
+        "id": msg_id,
         "type": "message",
-        "role": "assistant",
+        "role": role,
         "model": model,
-        "content": blocks,
-        "stop_reason": d.get("stop_reason") or "end_turn",
-        "stop_sequence": d.get("stop_sequence"),
+        "content": content,
+        "stop_reason": stop_reason or "end_turn",
+        "stop_sequence": stop_sequence,
         "usage": usage,
     }
-
-
-def _sse_event(event: str, data: dict) -> bytes:
-    """One Anthropic-style SSE event frame: ``event: <e>\\ndata: <json>\\n\\n``."""
-    return (f"event: {event}\n"
-            f"data: {json.dumps(data, separators=(',', ':'))}\n\n").encode("utf-8")
-
-
-def anthropic_message_to_sse(anth: dict):
-    """Emit a CORRECT Anthropic SSE sequence from a COMPLETE Anthropic message dict.
-
-    We call AnthropicVertex NON-streaming and re-emit the whole message as SSE.
-    Why buffer instead of streaming through: building the SSE from the already-
-    complete, already-parsed message (text + tool_use blocks with a real ``input``
-    object, from ``_message_to_anthropic_dict``) guarantees every tool call is
-    well-formed — an ``input_json_delta`` is only valid after a ``tool_use``
-    ``content_block_start`` that carries the tool ``id``+``name``, and getting that
-    ordering wrong makes Claude Code report "the model's tool call could not be
-    parsed" and fail the whole run.
-
-    Frames:
-        message_start -> [per block: content_block_start, *_delta, content_block_stop]
-                      -> message_delta(stop_reason, usage) -> message_stop
-
-    The full usage (incl. the cache split) rides on message_start (input side) AND
-    message_delta (output + cache echo) so ``usage_from_sse`` captures it exactly.
-    """
-    usage = anth.get("usage") or {}
-    msg_id = anth.get("id") or "msg_vertex_stream"
-    model = anth.get("model") or ""
-    start_usage = {
-        "input_tokens": usage.get("input_tokens", 0),
-        "output_tokens": 0,
-        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
-        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
-    }
-    yield _sse_event("message_start", {
-        "type": "message_start",
-        "message": {
-            "id": msg_id, "type": "message", "role": "assistant", "model": model,
-            "content": [], "stop_reason": None, "stop_sequence": None,
-            "usage": start_usage,
-        },
-    })
-
-    for i, blk in enumerate(anth.get("content") or []):
-        btype = blk.get("type")
-        if btype == "text":
-            yield _sse_event("content_block_start", {
-                "type": "content_block_start", "index": i,
-                "content_block": {"type": "text", "text": ""}})
-            text = blk.get("text") or ""
-            if text:
-                yield _sse_event("content_block_delta", {
-                    "type": "content_block_delta", "index": i,
-                    "delta": {"type": "text_delta", "text": text}})
-            yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": i})
-        elif btype == "tool_use":
-            # tool_use MUST start with id+name; the full input goes as ONE
-            # input_json_delta (clients accumulate partial_json then parse on stop).
-            yield _sse_event("content_block_start", {
-                "type": "content_block_start", "index": i,
-                "content_block": {"type": "tool_use", "id": blk.get("id"),
-                                  "name": blk.get("name"), "input": {}}})
-            yield _sse_event("content_block_delta", {
-                "type": "content_block_delta", "index": i,
-                "delta": {"type": "input_json_delta",
-                          "partial_json": json.dumps(blk.get("input") or {}, separators=(",", ":"))}})
-            yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": i})
-
-    delta_usage = {"output_tokens": usage.get("output_tokens", 0)}
-    for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
-        if usage.get(k) is not None:
-            delta_usage[k] = usage.get(k)
-    yield _sse_event("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": anth.get("stop_reason") or "end_turn", "stop_sequence": None},
-        "usage": delta_usage,
-    })
-    yield _sse_event("message_stop", {"type": "message_stop"})
 
 
 # ── the per-run usage sink (thread-safe append to JSONL) ──────────────────────
@@ -466,7 +460,8 @@ class UsageSink:
 
 # ── AnthropicVertex native bridge (lazy client, built once) ───────────────────
 def _make_vertex_completion(project: str, location: str):
-    """Build the DEFAULT Vertex completion_fn — a NATIVE ``AnthropicVertex`` call.
+    """Build the DEFAULT Vertex completion_fn — a NATIVE STREAMING ``AnthropicVertex``
+    call that returns the native event iterator (relays Anthropic events verbatim).
 
     The ``anthropic`` SDK is the ONE heavy dep; ``AnthropicVertex`` is imported and
     constructed LAZILY (only on the first request) so ``import bench.usage_gateway``,
@@ -475,19 +470,24 @@ def _make_vertex_completion(project: str, location: str):
     is ADC (Application Default Credentials) — no API key passed; project/location
     select the Vertex endpoint.
 
-    Returns a ``completion_fn(kwargs) -> Message`` closure. ``kwargs`` already
-    carries ``model`` (bare id) + the native Anthropic fields; we always call
-    NON-streaming (the gateway re-emits SSE itself off the complete message).
+    Returns a ``completion_fn(create_kwargs) -> iterable_of_events`` closure.
+    ``create_kwargs`` already carries ``model`` (bare id) + the native Anthropic
+    fields; we call ``stream=True`` and RETURN the SDK's event iterator. The events
+    are native Anthropic SSE events (message_start, content_block_*, message_delta,
+    message_stop) — the gateway relays them verbatim. ``stream=True`` is REQUIRED:
+    Claude Code sends a large ``max_tokens`` and the SDK refuses the equivalent
+    non-streaming call with ``ValueError: Streaming is required for operations that
+    may take longer than 10 minutes`` — iterating a stream avoids that guard.
     """
     cache: dict = {}
 
-    def _complete(kwargs: dict):
+    def _complete(create_kwargs: dict):
         client = cache.get("client")
         if client is None:
             from anthropic import AnthropicVertex  # lazy — heavy, Vertex-mode only
             client = AnthropicVertex(project_id=project, region=location)
             cache["client"] = client
-        return client.messages.create(stream=False, **kwargs)
+        return client.messages.create(stream=True, **create_kwargs)
 
     return _complete
 
@@ -517,9 +517,11 @@ def make_handler(upstream_base: str, sink: UsageSink,
     vertex_*        : Vertex routing (model id, project, location); auth is ADC on
                       the box (no API key).
     completion_fn   : injectable Vertex completion (Vertex mode) — a callable
-                      ``fn(create_kwargs) -> Message``. Defaults to a lazily-built
-                      native ``AnthropicVertex`` client (``_make_vertex_completion``).
-                      Tests pass a fake returning a Message-like dict/namespace.
+                      ``fn(create_kwargs) -> iterable_of_events`` returning the
+                      native Anthropic stream events. Defaults to a lazily-built
+                      native ``AnthropicVertex`` client called with ``stream=True``
+                      (``_make_vertex_completion``). Tests pass a fake yielding plain
+                      event dicts that mimic the SDK's events.
     """
     base = upstream_base.rstrip("/")
     extra_headers = dict(default_headers or {})
@@ -544,18 +546,24 @@ def make_handler(upstream_base: str, sink: UsageSink,
                 return
             self._passthrough(body, run_id, t0)
 
-        # ── Vertex mode: NATIVE passthrough — Anthropic Messages -> AnthropicVertex
+        # ── Vertex mode: NATIVE STREAMING passthrough (relays Anthropic events) ──
         def _bridge_vertex(self, body: bytes, run_id: str, t0: float) -> None:
-            """Forward the inbound Anthropic request NATIVELY via AnthropicVertex,
-            then relay an Anthropic Messages response (JSON or SSE), capturing usage.
+            """Forward the inbound Anthropic request NATIVELY via AnthropicVertex
+            with ``stream=True``, and RELAY THE NATIVE ANTHROPIC EVENTS VERBATIM —
+            as an event-stream to a streaming client, or reconstructed into one JSON
+            message for a non-streaming client. Captures usage off the events.
 
             count_tokens is handled locally (a cheap char-based estimate) so we
             never need a second upstream; the bench prices off the per-CALL usage
             rows from real messages, not count_tokens. The request IS already
-            Anthropic Messages format and the target IS Anthropic-on-Vertex, so
-            this is a pure passthrough — no foreign-shape translation. Any upstream
-            (AnthropicVertex / ADC) error returns a clean Anthropic-shaped error
-            (never a hang); usage we already have is still logged.
+            Anthropic Messages format and the target IS Anthropic-on-Vertex, and the
+            stream events the SDK yields ARE native Anthropic SSE events — so this is
+            a pure passthrough with ZERO translation (which kills the tool-call /
+            shape bug class). ``stream=True`` also sidesteps the SDK's
+            ``ValueError: Streaming is required ...`` guard that the large
+            ``max_tokens`` Claude Code sends would otherwise trip on a non-streaming
+            call. Any upstream (AnthropicVertex / ADC) error returns a clean
+            Anthropic-shaped error (never a hang); usage we already have is logged.
             """
             # /v1/messages/count_tokens — answer locally; no Vertex round-trip.
             if self.path.rstrip("/").endswith("count_tokens"):
@@ -568,25 +576,35 @@ def make_handler(upstream_base: str, sink: UsageSink,
                 self._gateway_error(400, f"bad request JSON: {type(e).__name__}: {str(e)[:120]}")
                 return
 
-            # Build native create kwargs (bare model id; native fields only). We
-            # always call NON-streaming, then re-emit as SSE if the client asked to
-            # stream — re-emitting off the COMPLETE message guarantees tool_use
-            # blocks carry a parsed `input` object (the streaming path is exact).
+            # Build native create kwargs (bare model id; native fields only). The
+            # completion_fn calls stream=True and returns the native event iterator.
             model = _strip_vertex_prefix(vertex_model)
             kwargs = _anthropic_create_kwargs(req_body, model)
             client_wants_stream = bool(req_body.get("stream"))
             try:
-                msg = _complete(kwargs)
+                event_stream = _complete(kwargs)
             except Exception as e:  # noqa: BLE001 — AnthropicVertex/upstream/ADC error
                 self._gateway_error(502, f"vertex upstream error: "
                                     f"{type(e).__name__}: {str(e)[:200]}")
                 return
 
-            anth = _message_to_anthropic_dict(msg, model)
-            # capture usage ONCE off the complete message (cache split included),
-            # BEFORE relaying (durable by the time the client returns).
+            # Consume the native events. ITERATING the stream is what avoids the
+            # SDK's "streaming required" guard; buffering the (type, data) pairs is
+            # fine — they're small and we need the full set to capture final usage
+            # and (for a non-stream client) reconstruct the message.
             try:
-                row = extract_usage(anth.get("usage"), time.time() - t0)
+                ev_dicts = [(_event_type(e), _event_data(e)) for e in event_stream]
+            except Exception as e:  # noqa: BLE001 — mid-stream upstream/ADC error
+                self._gateway_error(502, f"vertex stream error: "
+                                    f"{type(e).__name__}: {str(e)[:200]}")
+                return
+
+            # Pre-build the verbatim SSE frames once; usage is parsed from the same
+            # frames (the cache split rides on message_start + message_delta).
+            frames = [_sse_event(t, d) for (t, d) in ev_dicts]
+            try:
+                usage = usage_from_sse(b"".join(frames).decode("utf-8", "replace"))
+                row = extract_usage(usage, time.time() - t0)
                 if row is not None:
                     sink.write(run_id, row)
             except Exception as e:  # noqa: BLE001 — logging must never break the run
@@ -595,9 +613,9 @@ def make_handler(upstream_base: str, sink: UsageSink,
 
             try:
                 if client_wants_stream:
-                    self._relay_anth_sse(anth)
+                    self._relay_frames_sse(frames)
                 else:
-                    self._relay_anth_json(anth)
+                    self._relay_anth_json(_accumulate_anthropic_message(ev_dicts, model))
             except (BrokenPipeError, ConnectionError):
                 return  # client hung up — never crash
 
@@ -609,12 +627,13 @@ def make_handler(upstream_base: str, sink: UsageSink,
             self.end_headers()
             self.wfile.write(data)
 
-        def _relay_anth_sse(self, anth: dict) -> None:
+        def _relay_frames_sse(self, frames: list) -> None:
+            """Relay pre-built native Anthropic SSE event frames verbatim."""
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            for frame in anthropic_message_to_sse(anth):
+            for frame in frames:
                 self.wfile.write(frame)
                 self.wfile.flush()
 
