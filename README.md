@@ -20,7 +20,8 @@ different success bar — so none of them are comparable, and none tell you the 
 This benchmark fixes everything except the compression layer:
 
 - **One scaffold** — a fixed agent: headless **Claude Code**, driven through the Python Claude Agent SDK.
-- **One model** — the same Claude-class model for every arm (bring your own `ANTHROPIC_API_KEY`).
+- **One model** — **claude-sonnet on Vertex** (`vertex_ai/claude-sonnet-4-6`) for every arm, reached
+  through an internal **usage gateway** that is the single bottom bridge to Vertex (auth = ADC on the box).
 - **One task set** — a frozen slice of **SWE-bench Verified**, graded by the **official Docker harness**
   (a fix counts only if the repo's fail-to-pass tests pass and nothing else breaks).
 - **One leaderboard** — ranked by real money: **cost per solved task**.
@@ -50,6 +51,31 @@ deep call stacks — i.e. the regime that separates a real compression layer fro
 > _bear-1.2 (The Token Company) is access-gated (no self-serve API) and is currently a documented no-op;
 > the adapter is wired and will activate when access is granted._
 
+## Topology — the gateway is the single bottom bridge to Vertex
+
+The model is **claude-sonnet on Vertex** (`vertex_ai/claude-sonnet-4-6`, auth = ADC on the box). The
+vendor compression proxies only speak the **Anthropic API**, so an internal **usage gateway** speaks
+Anthropic on its front and bridges to Vertex (via litellm) on its back. Crucially the gateway sits at the
+**bottom** of every chain, so it always observes the **real post-compression usage** (the cache split
+included) and writes it to a per-run JSONL.
+
+```
+A0 (baseline)   Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway ──> Vertex
+proxy arms      Claude Code ──(ANTHROPIC_BASE_URL=vendor proxy)──> vendor proxy (compresses)
+                            ──(vendor's UPSTREAM = gateway)──> gateway ──> Vertex
+woz             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway ──> Vertex   (+ Woz MCP tools)
+```
+
+- **Vertex auth = ADC** on the runner box: `gcloud auth application-default login`. No API key is used
+  for the model. `VERTEX_PROJECT` / `VERTEX_LOCATION` (default `dasein-473321` / `us-east5`) and
+  `VERTEX_MODEL` select the endpoint.
+- We do **not** set `CLAUDE_CODE_USE_VERTEX` — Claude Code speaks the Anthropic API to the proxy/gateway
+  above it; only the gateway bridges to Vertex. Claude Code is handed a dummy **bridge token**
+  (`ANTHROPIC_AUTH_TOKEN`); the real Vertex credential lives on the gateway.
+- **Per-vendor upstream config (provisioning requirement):** each vendor proxy must be configured to
+  forward to the gateway URL (the runner prints it per run). See `arms/README.md` for exactly where that
+  upstream is set for edgee / rtk / headroom / compresr / dasein.
+
 ## Leaderboard
 
 <!-- BENCH:START -->
@@ -63,17 +89,20 @@ leaderboard table and figures, or see the latest published run under `results/`.
 # 1. Install
 pip install -e .
 
-# 2. Configure — copy the template and bring your own model endpoint + arm keys
-cp .env.example .env        # set OPENAI_BASE_URL / OPENAI_API_KEY / MODEL, and per-arm keys
+# 2. Auth the model: claude-sonnet on Vertex via Application Default Credentials
+gcloud auth application-default login    # ADC on the box — no model API key needed
 
-# 3. (self-host arms) launch the local proxies
-make selfhost-up            # edgee / rtk / headroom / compresr gateways
+# 3. Configure — copy the template and fill per-arm keys + (optional) Vertex overrides
+cp .env.example .env        # MODEL + per-arm endpoints; VERTEX_PROJECT/LOCATION default to dasein-473321/us-east5
 
-# 4. Smoke one task per arm, then the full set
+# 4. (self-host arms) launch the local proxies — each forwards to the gateway URL
+make selfhost-up            # edgee / rtk / headroom / compresr proxies (set their upstream = gateway)
+
+# 5. Smoke one task per arm, then the full set
 make smoke                  # 1 task per ready arm, end-to-end + grade
 make bench                  # the full bloated-50 across every ready arm (8 workers)
 
-# 5. Figures + leaderboard + README injection
+# 6. Figures + leaderboard + README injection
 make report
 ```
 

@@ -24,8 +24,11 @@ Dasein's hosted endpoint compresses server-side. The public repo holds only the 
 
 - **Env:** `DASEIN_API_KEY` (`dsk_...`), `DASEIN_BASE_URL`.
 - **Run:** set both env vars, then `make bench ARM=dasein`. No local service to launch.
-- The client points litellm at `DASEIN_BASE_URL` and sends the key as a bearer +
-  `X-Dasein-Api-Key` header.
+- **Topology:** Claude Code points `ANTHROPIC_BASE_URL` at `DASEIN_BASE_URL`; the Dasein
+  service's OWN upstream must forward to this run's gateway URL (the runner prints it), so the
+  chain is `Claude Code -> Dasein (compresses) -> gateway -> Vertex`. The Dasein service
+  authenticates its own key and is configured (at provisioning) with the gateway as upstream;
+  Claude Code talks Anthropic to Dasein directly.
 
 ## woz — Claude Code MCP server (ToolArm, paid)
 Woz is a paid Claude Code plugin that ships a **real MCP server**
@@ -81,9 +84,36 @@ default `0.5`), then the scaffold calls the model normally.
   identity (returns the input messages unchanged) so a hiccup never drops the prompt.
 
 ## edgee / rtk / headroom — self-hosted open-source proxies (ProxyArm)
-Each is an OpenAI-compatible compression proxy you run locally; it compresses the prompt
-and forwards to the shared model (`OPENAI_BASE_URL` / `MODEL`). The arm only routes litellm
-at the local endpoint — no client-side auth (the proxy holds the upstream key).
+Each is an Anthropic-API-speaking compression proxy you run locally; it compresses the prompt
+and forwards to **its configured upstream — which MUST be this run's gateway**. The arm only
+points Claude Code's `ANTHROPIC_BASE_URL` at the local proxy; the proxy holds no model key
+(the gateway, below it, bridges to Vertex via ADC).
+
+### Topology (the single bottom bridge)
+The usage gateway is the **single bottom bridge to Vertex** (claude-sonnet on Vertex via
+litellm + ADC). The full chain for a proxy arm is:
+
+```
+Claude Code  ──(ANTHROPIC_BASE_URL = <ARM>_BASE_URL)──>  vendor proxy (compresses)
+             ──(vendor's UPSTREAM = the gateway URL)──>  gateway  ──>  Vertex
+```
+
+The gateway sits at the bottom, so it captures the **real post-compression usage** (cache
+split included). **Per-vendor upstream config (provisioning requirement):** each vendor proxy
+must be told to forward to the gateway URL the runner prints per run
+(`its UPSTREAM must be http://127.0.0.1:<port>`). Where to set it:
+
+| arm | where the vendor's upstream is configured |
+|---|---|
+| **edgee** | `UPSTREAM_BASE_URL` in `selfhost/docker-compose.yml` (point at the gateway URL) |
+| **rtk** | the `--upstream` flag / config of `rtk serve` |
+| **headroom** | its LiteLLM upstream / base-URL config |
+| **compresr** | the Context Gateway's upstream setting |
+
+We do **not** set `CLAUDE_CODE_USE_VERTEX` and we do **not** inject the arm's `headers()`:
+Claude Code speaks the Anthropic API straight to the vendor proxy, so any vendor auth lives
+**on the vendor proxy** (configured at provisioning), and Vertex auth is **ADC on the box**
+held by the gateway.
 
 - **Env (defaults):** `EDGEE_BASE_URL=http://127.0.0.1:8801`,
   `RTK_BASE_URL=http://127.0.0.1:8802`, `HEADROOM_BASE_URL=http://127.0.0.1:8803`.
@@ -91,13 +121,13 @@ at the local endpoint — no client-side auth (the proxy holds the upstream key)
 - **Stop:** `make selfhost-down`.
 - **Per-project setup notes:**
   - **edgee** — open-source Rust gateway. Pin the published image (or add a `build:` context)
-    in `selfhost/docker-compose.yml` and configure it as a compression proxy forwarding to
-    `UPSTREAM_BASE_URL=${OPENAI_BASE_URL}`.
+    in `selfhost/docker-compose.yml` and configure it as a compression proxy whose
+    `UPSTREAM_BASE_URL` is the gateway URL (NOT Anthropic/Vertex directly).
   - **rtk** — open-source CLI proxy. Can also run outside Docker (`rtk serve --port 8802 ...`);
-    point `RTK_BASE_URL` at wherever it listens.
+    point `RTK_BASE_URL` at wherever it listens, and its `--upstream` at the gateway URL.
   - **headroom** — open-source, LiteLLM-native, reversible compression. Either run the
-    container in `selfhost/docker-compose.yml` or use its LiteLLM integration directly and
-    point `HEADROOM_BASE_URL` at it.
+    container in `selfhost/docker-compose.yml` or use its LiteLLM integration directly; point
+    `HEADROOM_BASE_URL` at it and its LiteLLM upstream at the gateway URL.
 
 > The compose file ships **skeleton** services (placeholder `image:` tags marked `TODO`).
 > Replace each with the project's real published image or a `build:` context before

@@ -27,10 +27,12 @@ import json
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from types import SimpleNamespace
 
 # make the repo root importable when run as a bare script (py tests/...).
 _ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +40,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from bench.usage_gateway import (  # noqa: E402
-    RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
+    MODE_PASSTHROUGH, RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
+    anthropic_request_to_litellm_args, litellm_response_to_anthropic,
 )
 
 
@@ -175,8 +178,10 @@ def _make_mock_upstream(stream: bool):
 def _through_gateway(stream: bool):
     mock_srv, upstream = _make_mock_upstream(stream)
     tmp = tempfile.mkdtemp(prefix="ccb_gw_")
+    # passthrough mode: the gateway forwards verbatim to the mock Anthropic upstream
+    # (the original behaviour). Vertex mode is covered separately below.
     gw = UsageGateway(upstream_base=upstream, log_dir=tmp,
-                      default_run_id="rid-1").start()
+                      default_run_id="rid-1", mode=MODE_PASSTHROUGH).start()
     try:
         req = urllib.request.Request(
             gw.base_url + "/v1/messages",
@@ -221,6 +226,182 @@ def test_gateway_logs_usage_json_path():
 
 def test_gateway_logs_usage_sse_path():
     _through_gateway(stream=True)
+
+
+# ── 4. Vertex mode: mocked litellm.completion -> Anthropic translation ────────
+# A fake litellm Usage object: OpenAI-shaped prompt_tokens is the FULL input
+# (uncached 120 + write 800 + read 5000 = 5920); the Anthropic cache split lives
+# on the private attrs litellm stuffs it into. Our translator must recover the
+# split and re-emit Anthropic's input_tokens (= uncached = 120).
+def _fake_usage():
+    u = SimpleNamespace(
+        prompt_tokens=5920, completion_tokens=45,
+        _cache_creation_input_tokens=800, _cache_read_input_tokens=5000,
+        prompt_tokens_details=None,
+    )
+    return u
+
+
+def _fake_litellm_response():
+    """An OpenAI-shaped litellm ModelResponse with a text reply + the cache split."""
+    msg = SimpleNamespace(content="done", tool_calls=None)
+    choice = SimpleNamespace(message=msg, finish_reason="stop")
+    return SimpleNamespace(id="chatcmpl-x", choices=[choice], usage=_fake_usage())
+
+
+def _fake_litellm_stream():
+    """An OpenAI-shaped litellm streaming response: content deltas then usage."""
+    def gen():
+        # two content deltas
+        for piece in ("do", "ne"):
+            delta = SimpleNamespace(content=piece, tool_calls=None)
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)],
+                                  usage=None)
+        # final chunk: finish_reason + usage (include_usage)
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=None),
+                                     finish_reason="stop")],
+            usage=_fake_usage())
+    return gen()
+
+
+def test_anthropic_request_to_litellm_args():
+    """An inbound Anthropic request becomes the right Vertex litellm args."""
+    body = {
+        "model": "claude-sonnet-4-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "system": "be terse",
+        "max_tokens": 1024,
+        "temperature": 0.2,
+        "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+        "stream": False,
+    }
+    args = anthropic_request_to_litellm_args(
+        body, "vertex_ai/claude-sonnet-4-6", "dasein-473321", "us-east5")
+    assert args["model"] == "vertex_ai/claude-sonnet-4-6"
+    assert args["vertex_project"] == "dasein-473321"
+    assert args["vertex_location"] == "us-east5"
+    assert args["messages"] == body["messages"]
+    assert args["system"] == "be terse"
+    assert args["max_tokens"] == 1024
+    assert args["temperature"] == 0.2
+    assert args["tools"] == body["tools"]
+    assert args["stream"] is False
+    # ADC auth: no api_key smuggled in
+    assert "api_key" not in args
+
+
+def test_litellm_response_to_anthropic_cache_split():
+    """A litellm response with a cache split relays as Anthropic format + usage."""
+    anth = litellm_response_to_anthropic(_fake_litellm_response(), "vertex_ai/claude-sonnet-4-6")
+    assert anth["type"] == "message"
+    assert anth["role"] == "assistant"
+    assert anth["stop_reason"] == "end_turn"
+    assert anth["content"] == [{"type": "text", "text": "done"}]
+    # Anthropic usage: input_tokens is the UNCACHED portion (120), split separate.
+    u = anth["usage"]
+    assert u["input_tokens"] == 120
+    assert u["output_tokens"] == 45
+    assert u["cache_creation_input_tokens"] == 800
+    assert u["cache_read_input_tokens"] == 5000
+    # and extract_usage normalizes it to the same CallUsage row as the wire paths
+    _assert_row(extract_usage(u))
+
+
+def _through_vertex_gateway(stream: bool):
+    """A request through a Vertex-mode gateway with a MOCKED litellm.completion.
+
+    Asserts the gateway (a) relayed an Anthropic-format response and (b) wrote the
+    right CallUsage row (cache split) to the per-run JSONL — for BOTH the JSON and
+    SSE paths.
+    """
+    tmp = tempfile.mkdtemp(prefix="ccb_gw_vtx_")
+    seen = {}
+
+    def fake_completion(args):
+        seen["args"] = args                # capture the translated litellm args
+        return _fake_litellm_stream() if args.get("stream") else _fake_litellm_response()
+
+    gw = UsageGateway(log_dir=tmp, default_run_id="rid-v",
+                      completion_fn=fake_completion).start()  # mode defaults to vertex
+    try:
+        req = urllib.request.Request(
+            gw.base_url + "/v1/messages",
+            data=json.dumps({"model": "claude-sonnet-4-5",
+                             "max_tokens": 512,
+                             "messages": [{"role": "user", "content": "hi"}],
+                             "stream": stream}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", RUN_ID_HEADER: "rid-v"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        relayed = resp.read()
+        # (a) the mocked completion got Vertex-routed args
+        assert seen["args"]["model"].startswith("vertex_ai/")
+        assert seen["args"]["vertex_project"]
+        assert seen["args"]["stream"] is stream
+        # (a') the gateway emitted Anthropic format (JSON message OR SSE events)
+        if stream:
+            assert resp.headers.get("Content-Type", "").startswith("text/event-stream")
+            assert b"message_start" in relayed and b"message_delta" in relayed
+        else:
+            assert resp.headers.get("Content-Type", "").startswith("application/json")
+            obj = json.loads(relayed)
+            assert obj["type"] == "message"
+            assert obj["content"] == [{"type": "text", "text": "done"}]
+        # (b) the CallUsage row captures the cache split
+        path = gw.usage_path("rid-v")
+        lines: list[str] = []
+        for _ in range(50):
+            if path.exists():
+                lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                if lines:
+                    break
+            time.sleep(0.02)
+        assert len(lines) == 1, f"expected exactly one usage row, got {len(lines)}"
+        _assert_row(json.loads(lines[0]))
+    finally:
+        gw.stop()
+
+
+def test_vertex_gateway_json_round_trip():
+    _through_vertex_gateway(stream=False)
+
+
+def test_vertex_gateway_sse_round_trip():
+    _through_vertex_gateway(stream=True)
+
+
+def test_vertex_gateway_upstream_error_is_clean():
+    """A litellm error returns a clean Anthropic-shaped error — never a hang."""
+    tmp = tempfile.mkdtemp(prefix="ccb_gw_err_")
+
+    def boom(args):
+        raise RuntimeError("vertex exploded")
+
+    gw = UsageGateway(log_dir=tmp, default_run_id="rid-e",
+                      completion_fn=boom).start()
+    try:
+        req = urllib.request.Request(
+            gw.base_url + "/v1/messages",
+            data=json.dumps({"max_tokens": 16,
+                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", RUN_ID_HEADER: "rid-e"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            got_code = 200
+            body = b""
+        except urllib.error.HTTPError as e:
+            got_code = e.code
+            body = e.read()
+        assert got_code == 502, f"expected a clean 502, got {got_code}"
+        err = json.loads(body)
+        assert err.get("type") == "error"
+        assert "vertex exploded" in json.dumps(err)
+    finally:
+        gw.stop()
 
 
 # ── standalone runner (py tests/test_usage_gateway.py) ───────────────────────

@@ -5,25 +5,42 @@ This SUPERSEDES the mini-swe-agent driver in ``bench.runner``. The fixed agent i
 now real, headless Claude Code, driven through the Python Claude Agent SDK
 (``claude_agent_sdk.query`` + ``ClaudeAgentOptions``). Every arm runs the SAME
 Claude Code scaffold against the SAME model; the ONLY thing that varies is the
-compression layer at the model-call seam — and we install that seam OUTSIDE the
-SDK, by pointing Claude Code's ``ANTHROPIC_BASE_URL`` at a per-run usage gateway
-whose UPSTREAM is the arm's endpoint:
+compression layer at the model-call seam.
 
-    ProxyArm  (dasein/edgee/rtk/compresr/headroom)
-        gateway upstream = arm.model_base_url(); arm.headers() are merged onto
-        every forwarded request. The arm compresses server-side; Claude Code is
-        unchanged. This is the product seam — A3S/Dasein under Claude Code.
+TOPOLOGY — the usage gateway is the SINGLE BOTTOM BRIDGE to Vertex
+------------------------------------------------------------------
+The model is **claude-sonnet on Vertex** (``vertex_ai/claude-sonnet-4-6``,
+ADC auth). The vendor compression proxies only speak the Anthropic API, so the
+gateway speaks Anthropic on its front and bridges to Vertex (via litellm) on its
+back. Because the gateway sits at the BOTTOM of every chain, it always observes
+the REAL post-compression usage the model billed (the cache split included).
 
-    BaselineArm (A0)
-        gateway upstream = the real model endpoint (direct). The control.
+    A0 (baseline)
+        Claude Code  ── ANTHROPIC_BASE_URL=gateway ──>  gateway ──> Vertex
+        The control: the model direct (no compression layer above the gateway).
 
-    ToolArm   (woz)
-        gateway upstream = the real model (same MODEL as A0), AND the arm's MCP
-        server is attached to the SDK via ClaudeAgentOptions.mcp_servers (command
-        + args + env from arm.attach()); its tools are allowed
-        (mcp__<server>__* ) and, per replace_tools, the native edit/grep tools
-        are disallowed so the agent reaches the model through Woz's tools. The
-        Woz explorer subagent is enabled via ClaudeAgentOptions.agents.
+    proxy arms (dasein/edgee/rtk/compresr/headroom)
+        Claude Code ── ANTHROPIC_BASE_URL=arm.model_base_url() ──> vendor proxy
+            (Anthropic) ── proxy's UPSTREAM = gateway ──> gateway ──> Vertex
+        The vendor compresses; the gateway BELOW it forwards to Vertex and
+        captures the real usage. PROVISIONING REQUIREMENT: each vendor proxy must
+        be configured to forward to the gateway URL (we expose ``gateway_url`` on
+        the arm config so provisioning can set each vendor's upstream — see the
+        README "per-vendor upstream config" table).
+
+    woz (ToolArm)
+        Claude Code ── ANTHROPIC_BASE_URL=gateway ──> gateway ──> Vertex  (model
+        direct, like A0) PLUS the Woz MCP plugin attached via
+        ClaudeAgentOptions.mcp_servers (command + args + env from arm.attach());
+        its tools are allowed (mcp__<server>__*) and, per replace_tools, the
+        native edit/grep tools are disallowed so the agent reaches the repo
+        through Woz's tools. The Woz explorer subagent is enabled via
+        ClaudeAgentOptions.agents.
+
+We do NOT set ``CLAUDE_CODE_USE_VERTEX``: Claude Code speaks the Anthropic API to
+the proxy/gateway above it; the GATEWAY is the only thing that bridges to Vertex.
+``ANTHROPIC_AUTH_TOKEN`` is a dummy/bridge token (the gateway holds the real
+Vertex ADC); Claude Code just needs a non-empty auth token to attach.
 
 The usage gateway (``bench.usage_gateway``) records the PER-REQUEST cache split
 (cache_creation / cache_read) that the SDK's own ``ResultMessage`` omits, into a
@@ -33,9 +50,9 @@ SDK's ``ResultMessage.total_cost_usd`` is the AUTHORITATIVE headline cost
 the price frames.
 
 Clean-room rule: this public repo must NOT import ``adaptive_context``. Heavy
-imports (``claude_agent_sdk``, and anything it pulls) are LAZY so ``--list-arms``
-and ``import bench.cc_runner`` work on a box where the SDK / Claude Code is not
-installed.
+imports (``claude_agent_sdk``; ``litellm`` inside the gateway) are LAZY so
+``--list-arms`` and ``import bench.cc_runner`` work on a box where the SDK /
+Claude Code / litellm is not installed.
 
 Scale-out, resume ledger, caps, and the durable GCS trace store mirror
 ``bench.runner`` exactly — only the per-(instance, arm) execution body changed.
@@ -66,9 +83,13 @@ from bench.arm import ArmKind, get_arm, available_arms
 from bench.grader import SWEBenchGrader
 from bench.pricing import price_run, rates_for
 from bench.schema import RunRecord
-# usage_gateway is pure stdlib (no claude_agent_sdk / litellm) — safe to import
-# eagerly; we need RUN_ID_HEADER to tag Claude Code's forwarded usage.
-from bench.usage_gateway import RUN_ID_HEADER, UsageGateway
+# usage_gateway is pure stdlib at import time (litellm is lazy, Vertex-mode only)
+# — safe to import eagerly; we need RUN_ID_HEADER to tag Claude Code's forwarded
+# usage and the Vertex defaults to wire the bottom bridge.
+from bench.usage_gateway import (
+    MODE_VERTEX, RUN_ID_HEADER, UsageGateway,
+    VERTEX_LOCATION, VERTEX_MODEL, VERTEX_PROJECT,
+)
 
 
 # ── defaults / caps (mirror bench.runner so ported A0/A3S rows share budgets) ─
@@ -77,18 +98,22 @@ CALL_CAP = 100                # max agent turns per (task, arm) — ClaudeAgentO
                               # Matches the v5/mini_swe step_limit=100 so ported A0/A3S rows
                               # and live vendor arms share an identical turn budget.
 WALL_CAP_S = 50 * 60          # hard wall-clock watchdog per solve (matches gate2 alarm(50*60))
-# Default model: a Claude id (the SDK speaks to a Claude-shaped endpoint behind the
-# gateway). Overridable via --model / MODEL. The gateway's upstream decides whether
-# that resolves to direct Anthropic, Vertex, or a vendor proxy.
+# Model id Claude Code SENDS on the wire (an Anthropic-shaped id). The gateway
+# ignores it and routes to the Vertex model below; it's just the label Claude Code
+# attaches and what we record on the RunRecord. Overridable via --model / MODEL.
 DEFAULT_MODEL = os.environ.get("MODEL", "claude-sonnet-4-5")
 
-# The real model endpoint the BaselineArm (A0) and ToolArm (woz, for the MODEL)
-# forward to. Overridable via env so A0 can target Anthropic direct OR a Vertex/
-# gateway URL without code changes.
-REAL_MODEL_BASE_URL = os.environ.get(
-    "ANTHROPIC_UPSTREAM_BASE_URL",
-    os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-)
+# The gateway is ALWAYS the bottom bridge to Vertex (claude-sonnet on Vertex via
+# litellm + ADC). These select the Vertex endpoint; auth is ADC on the box
+# (gcloud auth application-default login) — no API key. Overridable via env
+# (VERTEX_MODEL / VERTEX_PROJECT / VERTEX_LOCATION; defaults live in usage_gateway).
+GATEWAY_MODE = MODE_VERTEX
+
+# Dummy/bridge token handed to Claude Code as ANTHROPIC_AUTH_TOKEN. Claude Code
+# only needs a NON-EMPTY token to attach to the proxy/gateway; the real Vertex
+# credential is ADC held by the gateway, never by Claude Code. Overridable via env
+# only if a vendor proxy expects a specific bearer (set per-vendor at provisioning).
+BRIDGE_AUTH_TOKEN = os.environ.get("CCB_BRIDGE_AUTH_TOKEN", "ccb-bridge-token")
 
 # Native Claude Code tools the agent may use by default (the fixed scaffold's
 # surface). A ToolArm with replace_tools removes the file-mutation/search tools
@@ -140,27 +165,36 @@ def _fetch_instance(instance_id: str, dataset: str, split: str) -> dict:
 class _ArmConfig:
     """The resolved per-arm SDK wiring for one (instance, arm) solve.
 
+    The gateway is ALWAYS the bottom bridge to Vertex; what varies per arm is the
+    ``ANTHROPIC_BASE_URL`` Claude Code points at, and the tools/MCP it attaches.
+
     Computed once per solve from the arm's kind + hooks:
-      upstream_base   : the gateway's UPSTREAM base URL.
-                          ProxyArm   -> arm.model_base_url()
-                          Baseline   -> REAL_MODEL_BASE_URL
-                          ToolArm    -> REAL_MODEL_BASE_URL (model is direct; the
-                                        arm contributes TOOLS, not a proxy)
-      upstream_headers: headers merged onto every forwarded request.
-                          ProxyArm   -> arm.headers() (auth for a hosted proxy)
-                          others     -> {}
+      client_base_url : the ANTHROPIC_BASE_URL Claude Code points at. Resolved at
+                        run time once the gateway URL is known:
+                          ProxyArm   -> arm.model_base_url() (the VENDOR proxy;
+                                        its UPSTREAM is the gateway — provisioning)
+                          Baseline   -> the gateway URL (model direct via Vertex)
+                          ToolArm    -> the gateway URL (model direct; arm adds TOOLS)
+      proxy_base_url  : the vendor proxy URL for a ProxyArm (else ""). Recorded so
+                        the worker can log the chain + confirm provisioning intent.
       mcp_servers     : ClaudeAgentOptions.mcp_servers dict (ToolArm only).
       allowed_tools   : the agent's tool surface.
       disallowed_tools: tools removed (ToolArm replace_tools).
       agents          : subagent definitions (ToolArm explorer subagent).
-      server_env      : extra env for a spawned MCP server (kept off argv).
       setup_arm       : the Arm instance (its setup()/teardown() are run by the
                         worker; e.g. the Woz one-time CLI login).
+
+    NB: ``arm.headers()`` (a ProxyArm's vendor auth) is NOT injected by us — Claude
+    Code talks straight to the vendor proxy, so the vendor's auth is configured ON
+    THE VENDOR PROXY at provisioning (alongside its gateway upstream), not here.
     """
 
     def __init__(self) -> None:
-        self.upstream_base: str = REAL_MODEL_BASE_URL
-        self.upstream_headers: dict[str, str] = {}
+        # client_base_url is filled in build_arm_config; for the gateway-direct
+        # arms it's set to the gateway URL by the worker once the gateway starts
+        # (sentinel None until then).
+        self.client_base_url: Optional[str] = None
+        self.proxy_base_url: str = ""
         self.mcp_servers: dict = {}
         self.allowed_tools: list[str] = list(DEFAULT_ALLOWED_TOOLS)
         self.disallowed_tools: list[str] = []
@@ -188,21 +222,35 @@ def _woz_mcp_server_config(attach) -> Optional[dict]:
 
 
 def build_arm_config(arm) -> _ArmConfig:
-    """Map an arm onto its Claude Code SDK wiring (the arm->SDK contract)."""
+    """Map an arm onto its Claude Code SDK wiring (the arm->SDK contract).
+
+    The gateway (built by the worker) is ALWAYS the bottom bridge to Vertex. This
+    only decides WHERE Claude Code's ANTHROPIC_BASE_URL points:
+      * ProxyArm   -> the VENDOR proxy (arm.model_base_url()); the proxy's UPSTREAM
+                      is the gateway, set at provisioning. client_base_url stays
+                      the proxy; proxy_base_url records it for logging.
+      * Baseline   -> the gateway directly (client_base_url left None; the worker
+                      fills it with the gateway URL once it starts).
+      * ToolArm    -> the gateway directly (model direct, like A0) + MCP tools.
+    """
     cfg = _ArmConfig()
     cfg.setup_arm = arm
 
     if arm.kind == ArmKind.PROXY:
-        # The compression endpoint IS the gateway upstream; its headers (auth)
-        # are merged onto every forwarded request. Claude Code is unchanged.
+        # Claude Code points straight at the VENDOR proxy (Anthropic-speaking). The
+        # vendor compresses and forwards to ITS configured upstream — which MUST be
+        # this run's gateway (provisioning requirement; gateway URL is exposed to
+        # the worker's log so provisioning can set each vendor's upstream). We do
+        # NOT inject arm.headers() here: Claude Code talks to the vendor directly,
+        # so vendor auth lives ON THE VENDOR PROXY, configured at provisioning.
         base = arm.model_base_url()  # type: ignore[attr-defined]
         if base:
-            cfg.upstream_base = base
-        cfg.upstream_headers = dict(arm.headers() or {})  # type: ignore[attr-defined]
+            cfg.client_base_url = base
+            cfg.proxy_base_url = base
 
     elif arm.kind == ArmKind.TOOL:
-        # The model goes direct (same as A0); the arm contributes TOOLS via MCP.
-        cfg.upstream_base = REAL_MODEL_BASE_URL
+        # Model goes direct to the gateway (same as A0); the arm contributes TOOLS
+        # via MCP. client_base_url stays None -> worker points it at the gateway.
         attach = arm.attach()  # type: ignore[attr-defined]
         server_cfg = _woz_mcp_server_config(attach)
         server_name = arm.name  # mcp server key == arm name (e.g. "woz")
@@ -223,10 +271,11 @@ def build_arm_config(arm) -> _ArmConfig:
         # keep the native surface — the runner has nothing to dispatch tool calls
         # TO, so dead tool calls would just waste turns.
 
-    # BaselineArm / TransformArm: defaults (direct upstream, native tools). A
-    # TransformArm has no server-side seam under Claude Code (the SDK owns the
-    # message array), so it runs as the control here; client-side transforms are
-    # out of scope for the Claude Code product harness.
+    # BaselineArm / TransformArm: client_base_url left None -> the worker points
+    # Claude Code at the gateway directly (the control: model via Vertex, no
+    # compression layer above the gateway). A TransformArm has no server-side seam
+    # under Claude Code (the SDK owns the message array), so it runs as the control
+    # here; client-side transforms are out of scope for the Claude Code harness.
     return cfg
 
 
@@ -290,12 +339,16 @@ async def _run_sdk(
     cwd: str,
     model: str,
     arm_cfg: _ArmConfig,
-    gateway_base_url: str,
+    client_base_url: str,
     run_id: str,
     call_cap: int,
     env_overrides: dict,
 ) -> dict:
     """Run one headless Claude Code solve via the SDK and collect raw signals.
+
+    ``client_base_url`` is the ANTHROPIC_BASE_URL Claude Code points at: the
+    gateway directly (A0/woz) or the vendor proxy (proxy arms). Either way the
+    chain bottoms out at the gateway, which bridges to Vertex.
 
     Returns a dict of raw signals (reported cost, sdk usage, num_turns, message
     list for the trajectory dump, exit/limit signals). No grading or token
@@ -303,17 +356,23 @@ async def _run_sdk(
     """
     from claude_agent_sdk import ClaudeAgentOptions, query  # lazy
 
-    # Env the SDK subprocess inherits: point Claude Code at the gateway, set the
-    # run-id header (Claude Code forwards ANTHROPIC_CUSTOM_HEADERS onto every
-    # model request, so the gateway can tag usage), and the model. Auth is left
-    # to whatever ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN the process already
-    # has (the gateway forwards it untouched to the real upstream).
+    # Env the SDK subprocess inherits. NOTE: we do NOT set CLAUDE_CODE_USE_VERTEX —
+    # Claude Code speaks the Anthropic API to client_base_url (the gateway, or a
+    # vendor proxy above it); the GATEWAY is the only thing that bridges to Vertex.
     env = dict(os.environ)
-    env["ANTHROPIC_BASE_URL"] = gateway_base_url
+    env["ANTHROPIC_BASE_URL"] = client_base_url
     # Claude Code forwards ANTHROPIC_CUSTOM_HEADERS onto every model request, so the
     # gateway reads RUN_ID_HEADER off it to tag usage into the right per-run JSONL.
+    # (For proxy arms the vendor proxy must forward this header to the gateway —
+    # smoke item; see the report.)
     env["ANTHROPIC_CUSTOM_HEADERS"] = f"{RUN_ID_HEADER}: {run_id}"
     env.setdefault("ANTHROPIC_MODEL", model)
+    # Dummy/bridge auth token: Claude Code needs a NON-EMPTY auth token to attach,
+    # but the real Vertex credential is ADC held by the gateway. We set
+    # ANTHROPIC_AUTH_TOKEN (a bridge token) and clear ANTHROPIC_API_KEY so Claude
+    # Code uses the bearer path to the proxy/gateway, not a real Anthropic key.
+    env["ANTHROPIC_AUTH_TOKEN"] = BRIDGE_AUTH_TOKEN
+    env.pop("ANTHROPIC_API_KEY", None)
     env.update(env_overrides or {})
 
     options = ClaudeAgentOptions(
@@ -483,14 +542,31 @@ def run_agent(
     instance = _fetch_instance(instance_id, dataset, split)
     prompt = _build_task_prompt(instance, instance_id, repo_dir)
 
+    # The gateway is ALWAYS the bottom bridge to Vertex (claude-sonnet on Vertex
+    # via litellm + ADC). It captures the real post-compression usage regardless
+    # of whether a vendor proxy sits above it.
     usage_dir = str(Path(out_dir) / "usage")
     gw = UsageGateway(
-        upstream_base=arm_cfg.upstream_base,
         log_dir=usage_dir,
         default_run_id=run_id,
-        default_headers=arm_cfg.upstream_headers,
         timeout_s=float(wall_cap_s),
+        mode=GATEWAY_MODE,                 # vertex
+        vertex_model=VERTEX_MODEL,
+        vertex_project=VERTEX_PROJECT,
+        vertex_location=VERTEX_LOCATION,
     ).start()
+
+    # Where Claude Code points: the vendor proxy (proxy arms) or the gateway
+    # directly (A0/woz). For proxy arms the vendor proxy's UPSTREAM must be this
+    # gateway URL — a provisioning requirement we log so it can be verified.
+    client_base_url = arm_cfg.client_base_url or gw.base_url
+    if arm_cfg.proxy_base_url:
+        print(f"  chain [{arm.name}]: ClaudeCode -> {arm_cfg.proxy_base_url} "
+              f"(vendor proxy; its UPSTREAM must be {gw.base_url}) -> Vertex "
+              f"({VERTEX_MODEL})", flush=True)
+    else:
+        print(f"  chain [{arm.name}]: ClaudeCode -> {gw.base_url} (gateway) -> "
+              f"Vertex ({VERTEX_MODEL})", flush=True)
 
     t0 = time.time()
     exit_status = "incomplete"
@@ -499,7 +575,7 @@ def run_agent(
         raw = asyncio.run(
             _run_with_wall_cap(
                 prompt=prompt, cwd=repo_dir, model=model, arm_cfg=arm_cfg,
-                gateway_base_url=gw.base_url, run_id=run_id, call_cap=call_cap,
+                client_base_url=client_base_url, run_id=run_id, call_cap=call_cap,
                 wall_cap_s=wall_cap_s,
                 env_overrides={},
             )
