@@ -42,6 +42,7 @@ if str(_ROOT) not in sys.path:
 from bench.usage_gateway import (  # noqa: E402
     MODE_PASSTHROUGH, RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
     anthropic_request_to_litellm_args, litellm_response_to_anthropic,
+    anthropic_message_to_sse,
 )
 
 
@@ -249,20 +250,32 @@ def _fake_litellm_response():
     return SimpleNamespace(id="chatcmpl-x", choices=[choice], usage=_fake_usage())
 
 
-def _fake_litellm_stream():
-    """An OpenAI-shaped litellm streaming response: content deltas then usage."""
-    def gen():
-        # two content deltas
-        for piece in ("do", "ne"):
-            delta = SimpleNamespace(content=piece, tool_calls=None)
-            yield SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)],
-                                  usage=None)
-        # final chunk: finish_reason + usage (include_usage)
-        yield SimpleNamespace(
-            choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=None),
-                                     finish_reason="stop")],
-            usage=_fake_usage())
-    return gen()
+def _fake_litellm_toolcall_response():
+    """An OpenAI-shaped litellm response whose message is a TOOL CALL — args as a
+    JSON STRING, the way OpenAI/litellm return them. The gateway must parse the
+    string into an Anthropic tool_use ``input`` OBJECT; getting this wrong is what
+    made Claude Code report "the model's tool call could not be parsed" and fail
+    the whole run."""
+    fn = SimpleNamespace(name="Bash", arguments='{"command": "ls -la", "timeout": 5}')
+    tc = SimpleNamespace(id="toolu_abc", type="function", function=fn)
+    msg = SimpleNamespace(content=None, tool_calls=[tc])
+    choice = SimpleNamespace(message=msg, finish_reason="tool_calls")
+    return SimpleNamespace(id="chatcmpl-tool", choices=[choice], usage=_fake_usage())
+
+
+def _parse_sse_blocks(sse_text: str):
+    """Pull (event, data-dict) pairs out of an SSE body for assertions."""
+    out = []
+    for chunk in sse_text.split("\n\n"):
+        ev = dat = None
+        for line in chunk.splitlines():
+            if line.startswith("event:"):
+                ev = line[6:].strip()
+            elif line.startswith("data:"):
+                dat = json.loads(line[5:].strip())
+        if ev and dat is not None:
+            out.append((ev, dat))
+    return out
 
 
 def test_anthropic_request_to_litellm_args():
@@ -320,7 +333,7 @@ def _through_vertex_gateway(stream: bool):
 
     def fake_completion(args):
         seen["args"] = args                # capture the translated litellm args
-        return _fake_litellm_stream() if args.get("stream") else _fake_litellm_response()
+        return _fake_litellm_response()    # gateway always calls litellm NON-streaming
 
     gw = UsageGateway(log_dir=tmp, default_run_id="rid-v",
                       completion_fn=fake_completion).start()  # mode defaults to vertex
@@ -336,14 +349,20 @@ def _through_vertex_gateway(stream: bool):
         )
         resp = urllib.request.urlopen(req, timeout=10)
         relayed = resp.read()
-        # (a) the mocked completion got Vertex-routed args
+        # (a) the mocked completion got Vertex-routed args, ALWAYS non-streaming
+        # (the gateway buffers upstream and re-emits SSE itself — so tool calls
+        # translate correctly off the complete message).
         assert seen["args"]["model"].startswith("vertex_ai/")
         assert seen["args"]["vertex_project"]
-        assert seen["args"]["stream"] is stream
+        assert seen["args"]["stream"] is False
         # (a') the gateway emitted Anthropic format (JSON message OR SSE events)
         if stream:
             assert resp.headers.get("Content-Type", "").startswith("text/event-stream")
-            assert b"message_start" in relayed and b"message_delta" in relayed
+            blocks = _parse_sse_blocks(relayed.decode())
+            evs = [e for e, _ in blocks]
+            assert "message_start" in evs and "message_delta" in evs and "message_stop" in evs
+            deltas = [d for e, d in blocks if e == "content_block_delta"]
+            assert any(d.get("delta", {}).get("text") == "done" for d in deltas)
         else:
             assert resp.headers.get("Content-Type", "").startswith("application/json")
             obj = json.loads(relayed)
@@ -370,6 +389,33 @@ def test_vertex_gateway_json_round_trip():
 
 def test_vertex_gateway_sse_round_trip():
     _through_vertex_gateway(stream=True)
+
+
+def test_vertex_tool_call_survives_json_and_sse():
+    """A model TOOL CALL must round-trip as a well-formed Anthropic tool_use with a
+    PARSED input object — both as JSON and over SSE. Regression: the streaming path
+    dropped tool calls -> Claude Code reported 'the model's tool call could not be
+    parsed' -> the whole run failed (the A0 smoke caught exactly this)."""
+    # (a) non-streaming translation parses the arguments-STRING into an input OBJECT
+    anth = litellm_response_to_anthropic(
+        _fake_litellm_toolcall_response(), "vertex_ai/claude-sonnet-4-6")
+    tu = [b for b in anth["content"] if b["type"] == "tool_use"]
+    assert len(tu) == 1
+    assert tu[0]["name"] == "Bash" and tu[0]["id"] == "toolu_abc"
+    assert tu[0]["input"] == {"command": "ls -la", "timeout": 5}   # parsed, NOT a string
+    assert anth["stop_reason"] == "tool_use"
+    # (b) SSE re-emission: tool_use content_block_start carries id+name, and the
+    # input rides as an input_json_delta partial_json that parses back to the object
+    blocks = _parse_sse_blocks(b"".join(anthropic_message_to_sse(anth)).decode())
+    tu_start = [d for e, d in blocks
+                if e == "content_block_start" and d["content_block"]["type"] == "tool_use"]
+    assert len(tu_start) == 1
+    assert tu_start[0]["content_block"]["id"] == "toolu_abc"
+    assert tu_start[0]["content_block"]["name"] == "Bash"
+    ijd = [d for e, d in blocks
+           if e == "content_block_delta" and d.get("delta", {}).get("type") == "input_json_delta"]
+    assert len(ijd) == 1
+    assert json.loads(ijd[0]["delta"]["partial_json"]) == {"command": "ls -la", "timeout": 5}
 
 
 def test_vertex_gateway_upstream_error_is_clean():

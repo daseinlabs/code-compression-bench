@@ -409,91 +409,77 @@ def _sse_event(event: str, data: dict) -> bytes:
             f"data: {json.dumps(data, separators=(',', ':'))}\n\n").encode("utf-8")
 
 
-def litellm_stream_to_anthropic_sse(stream: Any, model: str):
-    """Translate a litellm streaming response into Anthropic SSE event bytes.
+def anthropic_message_to_sse(anth: dict):
+    """Emit a CORRECT Anthropic SSE sequence from a COMPLETE Anthropic message dict.
 
-    litellm yields OpenAI-shaped ``ModelResponseStream`` chunks (delta.content /
-    delta.tool_calls + a final usage when ``include_usage`` is set). We emit the
-    Anthropic event sequence the Messages API streams:
+    We buffer the upstream (litellm is called NON-streaming) and re-emit the whole
+    message as SSE. Why buffer instead of translating litellm's streaming chunks:
+    the incremental OpenAI->Anthropic translation of TOOL CALLS is fragile — an
+    ``input_json_delta`` is only valid after a ``tool_use`` ``content_block_start``
+    that carries the tool ``id``+``name``; getting that wrong makes Claude Code
+    report "the model's tool call could not be parsed" and fail the whole run.
+    Building the SSE from the already-correctly-parsed message (text + tool_use
+    blocks with a real ``input`` object, from ``_content_blocks_from_choice``)
+    guarantees every tool call is well-formed.
 
-        message_start -> content_block_start -> content_block_delta* ->
-        content_block_stop -> message_delta (stop_reason + usage) -> message_stop
+    Frames:
+        message_start -> [per block: content_block_start, *_delta, content_block_stop]
+                      -> message_delta(stop_reason, usage) -> message_stop
 
-    Yields ``bytes`` (encoded SSE frames). The merged usage (with the cache split)
-    is carried on the final ``message_delta`` so ``usage_from_sse``/``extract_usage``
-    capture it exactly as for a real Anthropic stream. Tool-call deltas are
-    accumulated and flushed as a single ``input_json_delta`` block (sufficient for
-    usage capture and a faithful content relay; the agent re-parses tool input
-    from the assembled JSON).
-
-    Robust: a malformed chunk is skipped; a stream that ends without usage still
-    closes the event sequence cleanly.
+    The full usage (incl. the cache split) rides on message_start (input side) AND
+    message_delta (output + cache echo) so ``usage_from_sse`` captures it exactly.
     """
-    msg_id = "msg_vertex_stream"
-    # message_start: input-side usage is unknown until the end on Vertex/litellm,
-    # so start with zeros and correct it on the final message_delta.
+    usage = anth.get("usage") or {}
+    msg_id = anth.get("id") or "msg_vertex_stream"
+    model = anth.get("model") or ""
+    start_usage = {
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": 0,
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+    }
     yield _sse_event("message_start", {
         "type": "message_start",
         "message": {
             "id": msg_id, "type": "message", "role": "assistant", "model": model,
             "content": [], "stop_reason": None, "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": start_usage,
         },
     })
-    yield _sse_event("content_block_start", {
-        "type": "content_block_start", "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    })
 
-    final_usage_obj = None
-    finish_reason = "stop"
-    saw_text = False
-    for chunk in stream:
-        try:
-            choices = getattr(chunk, "choices", None)
-            if choices is None and isinstance(chunk, dict):
-                choices = chunk.get("choices")
-            if choices:
-                c0 = choices[0]
-                delta = getattr(c0, "delta", None)
-                if delta is None and isinstance(c0, dict):
-                    delta = c0.get("delta")
-                fr = getattr(c0, "finish_reason", None)
-                if fr is None and isinstance(c0, dict):
-                    fr = c0.get("finish_reason")
-                if fr:
-                    finish_reason = fr
-                piece = getattr(delta, "content", None)
-                if piece is None and isinstance(delta, dict):
-                    piece = delta.get("content")
-                if piece:
-                    saw_text = True
-                    yield _sse_event("content_block_delta", {
-                        "type": "content_block_delta", "index": 0,
-                        "delta": {"type": "text_delta", "text": piece},
-                    })
-            u = getattr(chunk, "usage", None)
-            if u is None and isinstance(chunk, dict):
-                u = chunk.get("usage")
-            if u is not None:
-                final_usage_obj = u
-        except Exception:  # noqa: BLE001 — never let one bad chunk break the stream
-            continue
+    for i, blk in enumerate(anth.get("content") or []):
+        btype = blk.get("type")
+        if btype == "text":
+            yield _sse_event("content_block_start", {
+                "type": "content_block_start", "index": i,
+                "content_block": {"type": "text", "text": ""}})
+            text = blk.get("text") or ""
+            if text:
+                yield _sse_event("content_block_delta", {
+                    "type": "content_block_delta", "index": i,
+                    "delta": {"type": "text_delta", "text": text}})
+            yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": i})
+        elif btype == "tool_use":
+            # tool_use MUST start with id+name; the full input goes as ONE
+            # input_json_delta (clients accumulate partial_json then parse on stop).
+            yield _sse_event("content_block_start", {
+                "type": "content_block_start", "index": i,
+                "content_block": {"type": "tool_use", "id": blk.get("id"),
+                                  "name": blk.get("name"), "input": {}}})
+            yield _sse_event("content_block_delta", {
+                "type": "content_block_delta", "index": i,
+                "delta": {"type": "input_json_delta",
+                          "partial_json": json.dumps(blk.get("input") or {}, separators=(",", ":"))}})
+            yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": i})
 
-    _ = saw_text  # text presence not needed past here; block 0 always opened/closed
-    yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": 0})
-
-    anth_usage = _usage_obj_to_anthropic(final_usage_obj)
-    # message_delta carries the authoritative final usage (incl. cache split) the
-    # SSE usage parser reads. Anthropic puts only the CUMULATIVE output_tokens (and
-    # a cache echo) on message_delta.usage; the input side rides on message_start —
-    # but our message_start sent zeros, so we echo the FULL usage here and let
-    # usage_from_sse merge it (it takes message_delta fields as authoritative).
+    delta_usage = {"output_tokens": usage.get("output_tokens", 0)}
+    for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        if usage.get(k) is not None:
+            delta_usage[k] = usage.get(k)
     yield _sse_event("message_delta", {
         "type": "message_delta",
-        "delta": {"stop_reason": _STOP_REASON.get(finish_reason, "end_turn"),
-                  "stop_sequence": None},
-        "usage": anth_usage or {"output_tokens": 0},
+        "delta": {"stop_reason": anth.get("stop_reason") or "end_turn", "stop_sequence": None},
+        "usage": delta_usage,
     })
     yield _sse_event("message_stop", {"type": "message_stop"})
 
@@ -619,7 +605,14 @@ def make_handler(upstream_base: str, sink: UsageSink,
                                     f"{type(e).__name__}: {str(e)[:160]}")
                 return
 
-            stream = bool(args.get("stream"))
+            # Always call litellm NON-streaming, then re-emit as SSE if the client
+            # asked to stream. Tool-call args parse correctly into an Anthropic
+            # tool_use `input` object only on the complete message; the incremental
+            # streaming translation dropped tool calls -> Claude Code reported "the
+            # model's tool call could not be parsed" and failed the whole run.
+            client_wants_stream = bool(req_body.get("stream"))
+            args["stream"] = False
+            args.pop("stream_options", None)
             try:
                 resp = _complete(args)
             except Exception as e:  # noqa: BLE001 — litellm/upstream/ADC error
@@ -627,18 +620,9 @@ def make_handler(upstream_base: str, sink: UsageSink,
                                     f"{type(e).__name__}: {str(e)[:200]}")
                 return
 
-            try:
-                if stream:
-                    self._relay_vertex_stream(resp, run_id, t0)
-                else:
-                    self._relay_vertex_json(resp, run_id, t0)
-            except (BrokenPipeError, ConnectionError):
-                return  # client hung up — never crash
-
-        def _relay_vertex_json(self, resp, run_id: str, t0: float) -> None:
             anth = litellm_response_to_anthropic(resp, vertex_model)
-            data = json.dumps(anth).encode("utf-8")
-            # log usage BEFORE relaying (durable by the time the client returns).
+            # capture usage ONCE off the complete message (cache split included),
+            # BEFORE relaying (durable by the time the client returns).
             try:
                 row = extract_usage(anth.get("usage"), time.time() - t0)
                 if row is not None:
@@ -646,32 +630,31 @@ def make_handler(upstream_base: str, sink: UsageSink,
             except Exception as e:  # noqa: BLE001 — logging must never break the run
                 print(f"  usage_gateway WARN: vertex usage capture failed: "
                       f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+
+            try:
+                if client_wants_stream:
+                    self._relay_anth_sse(anth)
+                else:
+                    self._relay_anth_json(anth)
+            except (BrokenPipeError, ConnectionError):
+                return  # client hung up — never crash
+
+        def _relay_anth_json(self, anth: dict) -> None:
+            data = json.dumps(anth).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
-        def _relay_vertex_stream(self, resp, run_id: str, t0: float) -> None:
+        def _relay_anth_sse(self, anth: dict) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            chunks: list[bytes] = []
-            for frame in litellm_stream_to_anthropic_sse(resp, vertex_model):
-                chunks.append(frame)
+            for frame in anthropic_message_to_sse(anth):
                 self.wfile.write(frame)
                 self.wfile.flush()
-            # capture usage off the SSE we just emitted (same parser as passthrough).
-            try:
-                body_text = b"".join(chunks).decode("utf-8", "replace")
-                usage = usage_from_sse(body_text)
-                row = extract_usage(usage, time.time() - t0)
-                if row is not None:
-                    sink.write(run_id, row)
-            except Exception as e:  # noqa: BLE001 — logging must never break the run
-                print(f"  usage_gateway WARN: vertex SSE usage capture failed: "
-                      f"{type(e).__name__}: {str(e)[:160]}", flush=True)
 
         def _vertex_count_tokens(self, body: bytes) -> None:
             """Local count_tokens estimate (no Vertex round-trip).
