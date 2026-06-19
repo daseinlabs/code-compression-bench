@@ -7,15 +7,21 @@ name = "code-compression-bench"
 version = "0.1.0"
 description = "A clean-room industry benchmark for LLM prompt-compression layers on coding agents."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Dasein Labs", email = "hello@daseinlabs.ai" }]
 
-# Keep deps light. pandas is optional (report works on stdlib csv).
+# The fixed agent is headless Claude Code (Python Claude Agent SDK). The model is
+# claude-sonnet on Vertex, reached through the internal usage gateway (litellm +
+# Vertex/ADC). datasets resolves SWE-bench instances; swebench is the grader.
 dependencies = [
+    "claude-agent-sdk>=0.1",
     "litellm>=1.50",
+    "google-cloud-aiplatform>=1.60",
+    "google-auth>=2.30",
+    "datasets>=2.20",
+    "swebench>=2.0",
     "matplotlib>=3.8",
-    "mini-swe-agent>=1.0",
     "python-dotenv>=1.0",
     "requests>=2.31",
 ]
@@ -32,4 +38,4 @@ packages = ["bench", "arms"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py310"
