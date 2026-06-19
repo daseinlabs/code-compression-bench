@@ -12,10 +12,14 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Dasein Labs", email = "hello@daseinlabs.ai" }]
 
 # The fixed agent is headless Claude Code (Python Claude Agent SDK). The model is
-# claude-sonnet on Vertex, reached through the internal usage gateway (litellm +
-# Vertex/ADC). datasets resolves SWE-bench instances; swebench is the grader.
+# claude-sonnet on Vertex, reached through the internal usage gateway, which now
+# forwards NATIVELY via the anthropic SDK's AnthropicVertex client (ADC auth) — a
+# pure Anthropic-Messages passthrough, no litellm translation. (litellm remains
+# only for the legacy bench.runner path; the gateway no longer needs it.)
+# datasets resolves SWE-bench instances; swebench is the grader.
 dependencies = [
     "claude-agent-sdk>=0.1",
+    "anthropic[vertex]>=0.40",
     "litellm>=1.50",
     "google-cloud-aiplatform>=1.60",
     "google-auth>=2.30",

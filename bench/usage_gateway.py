@@ -20,16 +20,24 @@ the prompt above us.
 
 TWO UPSTREAM MODES (env/arg ``CCB_GATEWAY_MODE``; default ``vertex``)
 --------------------------------------------------------------------
-  * ``vertex``      — the gateway IS the Vertex bridge. It receives Anthropic
-                      ``/v1/messages`` (+ ``/v1/messages/count_tokens``) and calls
-                      ``litellm.completion(model="vertex_ai/claude-sonnet-4-6",
-                      vertex_project=..., vertex_location=..., ...)`` with ADC auth
-                      (no API key). The inbound Anthropic request is translated to
-                      litellm args; the litellm response is translated back to an
-                      Anthropic Messages response (JSON or SSE). This is the seam
-                      that lets the WHOLE chain speak Anthropic (Claude Code and
-                      the vendor proxies only speak the Anthropic API) while the
-                      real model runs claude-sonnet on Vertex via ADC.
+  * ``vertex``      — the gateway IS the Vertex bridge, a NATIVE passthrough. It
+                      receives Anthropic ``/v1/messages`` (+
+                      ``/v1/messages/count_tokens``) and forwards the request
+                      NATIVELY via the ``anthropic`` SDK's ``AnthropicVertex``
+                      client (``client.messages.create(model="claude-sonnet-4-6",
+                      ...)``) with ADC auth (no API key). The inbound request IS
+                      already Anthropic Messages format and the target IS
+                      Anthropic-on-Vertex, so this is a pure passthrough — the
+                      recognized native fields (messages/system/tools/tool_choice/
+                      thinking/…) ride through untouched, and the returned Message
+                      becomes an Anthropic Messages response (JSON or SSE). This is
+                      the seam that lets the WHOLE chain speak Anthropic (Claude
+                      Code and the vendor proxies only speak the Anthropic API)
+                      while the real model runs claude-sonnet on Vertex via ADC.
+                      (The old litellm <-> OpenAI translation layer is gone: it
+                      dropped tool_calls -> "the model's tool call could not be
+                      parsed", and rejected Anthropic-native messages -> "Invalid
+                      user message ... not valid OpenAI chat completion messages".)
   * ``passthrough`` — the original behaviour: forward each request verbatim to a
                       configured upstream base URL (urllib), a passive observer of
                       the wire. Used for an Anthropic-direct upstream or to chain
@@ -39,7 +47,7 @@ WHAT IT CAPTURES (Anthropic usage shape)
 ----------------------------------------
 From each response's ``usage`` object (non-streaming JSON body, OR the final
 ``message_delta``/``message_start`` of an SSE stream — or, in Vertex mode, the
-litellm response's ``usage``):
+``AnthropicVertex`` Message's ``usage``):
   - input_tokens                -> uncached new input (Anthropic reports the
                                    UNCACHED portion here, cache split separate)
   - output_tokens               -> completion tokens
@@ -54,20 +62,21 @@ ROBUSTNESS (a paid run must never be hung by the gateway)
 Every failure mode degrades safely. In passthrough mode a parse error, a non-JSON
 body, an unexpected content-type, a usage object the upstream didn't send — none
 of these break the proxied call; the client gets the upstream's bytes back
-unchanged and we merely fail to LOG a usage row. In Vertex mode a translation or
-litellm error returns a clean Anthropic-shaped error response (never a hang), and
-we still log whatever usage we managed to read. Streaming responses are streamed
-through so the SDK sees tokens as they arrive; we tee the bytes to a usage parser
-on the side.
+unchanged and we merely fail to LOG a usage row. In Vertex mode an upstream
+(AnthropicVertex / ADC) error returns a clean Anthropic-shaped error response
+(never a hang), and we still log whatever usage we managed to read. Streaming
+responses are streamed through so the SDK sees tokens as they arrive; we tee the
+bytes to a usage parser on the side.
 
 CLEAN-ROOM
 ----------
 The module itself is pure stdlib (``http.server``, ``urllib``, ``json``,
-``threading``). It has NO ``adaptive_context`` import and NO vendor SDK. The ONE
-heavy dependency — ``litellm`` — is imported LAZILY, only on the first Vertex-mode
-request, so ``import bench.usage_gateway`` / ``import bench.cc_runner`` and the
-passthrough mode work on a box without litellm installed. ``bench.schema`` is
-imported only for the ``CallUsage`` TypedDict shape (stdlib dataclasses/typing).
+``threading``). It has NO ``adaptive_context`` import. The ONE heavy dependency —
+the ``anthropic`` SDK (``AnthropicVertex``) — is imported LAZILY, only when the
+default Vertex completion_fn first runs, so ``import bench.usage_gateway`` /
+``import bench.cc_runner``, the tests, and the passthrough mode all work on a box
+without ``anthropic`` installed. ``bench.schema`` is imported only for the
+``CallUsage`` TypedDict shape (stdlib dataclasses/typing).
 """
 
 from __future__ import annotations
@@ -86,13 +95,15 @@ from typing import Any, Optional
 from bench.schema import CallUsage
 
 # ── upstream modes ────────────────────────────────────────────────────────────
-MODE_VERTEX = "vertex"            # gateway IS the litellm->Vertex bridge (default)
+MODE_VERTEX = "vertex"            # gateway IS the AnthropicVertex native bridge (default)
 MODE_PASSTHROUGH = "passthrough"  # gateway forwards verbatim to an upstream URL
 
-# ── Vertex defaults (claude-sonnet on Vertex via litellm + ADC) ──────────────
+# ── Vertex defaults (claude-sonnet on Vertex via AnthropicVertex + ADC) ──────
 # Auth is Application Default Credentials on the box (gcloud auth application-default
 # login) — NO API key. project/location are overridable via env to retarget without
-# a code change; the model id is the Vertex Claude id litellm routes to Vertex.
+# a code change. cc_runner passes VERTEX_MODEL="vertex_ai/claude-sonnet-4-6"; the
+# native AnthropicVertex client wants the BARE id, so the leading "vertex_ai/" is
+# stripped (``_strip_vertex_prefix``) before use.
 VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "vertex_ai/claude-sonnet-4-6")
 VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "dasein-473321")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-east5")
@@ -212,194 +223,135 @@ def usage_from_sse(body_text: str) -> Optional[dict]:
     return merged if saw else None
 
 
-def _usage_obj_to_anthropic(usage: Any) -> dict:
-    """Normalize a litellm ``Usage`` (OpenAI-shaped) into the Anthropic usage dict.
+# ── Anthropic Messages -> AnthropicVertex create kwargs (native passthrough) ──
+def _strip_vertex_prefix(model: str) -> str:
+    """Strip a leading ``"vertex_ai/"`` so AnthropicVertex gets the BARE model id.
 
-    ``litellm.completion`` returns an OpenAI-shaped ``ModelResponse``; its
-    ``usage`` carries the Anthropic cache split in TWO places (litellm stuffs it
-    both on private attrs and into ``prompt_tokens_details``):
-      - write: ``usage._cache_creation_input_tokens`` OR
-               ``usage.prompt_tokens_details.cache_creation_tokens``
-      - read : ``usage._cache_read_input_tokens`` OR
-               ``usage.prompt_tokens_details.cached_tokens``
-    OpenAI ``prompt_tokens`` is the FULL input (cached + uncached); Anthropic's
-    ``input_tokens`` is the UNCACHED portion only. We emit the Anthropic shape
-    (``input_tokens`` = uncached new input, cache split separate) so the SAME
-    ``extract_usage`` path handles both modes. Reads attr- OR dict-shaped usage.
+    cc_runner passes ``VERTEX_MODEL="vertex_ai/claude-sonnet-4-6"`` (the litellm
+    routing id). The native ``AnthropicVertex`` client wants ``"claude-sonnet-4-6"``.
     """
-    if usage is None:
-        return {}
-
-    def g(key: str) -> Optional[int]:
-        v = getattr(usage, key, None)
-        if v is None and isinstance(usage, dict):
-            v = usage.get(key)
-        return int(v) if isinstance(v, (int, float)) else None
-
-    prompt = g("prompt_tokens") or 0
-    completion = g("completion_tokens") or 0
-
-    # cache WRITE
-    write = g("_cache_creation_input_tokens")
-    if write is None:
-        write = g("cache_creation_input_tokens")
-    # cache READ
-    read = g("_cache_read_input_tokens")
-    if read is None:
-        read = g("cache_read_input_tokens")
-
-    # fall back to prompt_tokens_details (attr or dict) for either field.
-    details = getattr(usage, "prompt_tokens_details", None)
-    if details is None and isinstance(usage, dict):
-        details = usage.get("prompt_tokens_details")
-    if details is not None:
-        if read is None:
-            r = getattr(details, "cached_tokens", None)
-            if r is None and isinstance(details, dict):
-                r = details.get("cached_tokens")
-            read = int(r) if isinstance(r, (int, float)) else read
-        if write is None:
-            w = getattr(details, "cache_creation_tokens", None)
-            if w is None and isinstance(details, dict):
-                w = details.get("cache_creation_tokens")
-            write = int(w) if isinstance(w, (int, float)) else write
-
-    write = write or 0
-    read = read or 0
-    # OpenAI prompt_tokens is FULL input; Anthropic input_tokens is UNCACHED only.
-    uncached = max(prompt - write - read, 0)
-    out: dict = {"input_tokens": uncached, "output_tokens": completion}
-    # emit cache keys only when the provider reported a split (presence is the
-    # signal extract_usage/pricing use to pick the real-cache path).
-    if write:
-        out["cache_creation_input_tokens"] = write
-    if read:
-        out["cache_read_input_tokens"] = read
-    return out
+    if model and model.startswith("vertex_ai/"):
+        return model[len("vertex_ai/"):]
+    return model
 
 
-# ── Anthropic Messages <-> litellm.completion translation (Vertex mode) ───────
-def anthropic_request_to_litellm_args(body: dict, model: str,
-                                      project: str, location: str) -> dict:
-    """Map an inbound Anthropic ``/v1/messages`` request body -> litellm kwargs.
+# Native Anthropic Messages fields we pass through verbatim when present. The
+# inbound request IS Anthropic Messages format and the target IS Anthropic — so
+# this is a pure passthrough; we never translate to a foreign (OpenAI) shape.
+# ``stream`` is handled separately (the gateway buffers + re-emits SSE itself),
+# and ``model`` is forced to the configured Vertex model, so neither appears here.
+_NATIVE_PASSTHROUGH_FIELDS = (
+    "messages", "system", "tools", "tool_choice", "temperature", "top_p",
+    "top_k", "stop_sequences", "metadata", "thinking",
+)
 
-    Anthropic Messages requests carry ``model``, ``messages`` (content blocks),
-    ``system`` (string OR a list of text blocks), ``max_tokens``, ``tools``,
-    ``tool_choice``, ``stream``, ``temperature``, ``top_p``, ``top_k``,
-    ``stop_sequences``. litellm's Anthropic-family path accepts the SAME
-    Anthropic-native ``messages``/``system``/``tools`` shapes (it translates them
-    to the Vertex Anthropic API itself), so this is a near-passthrough: we force
-    the Vertex routing (model id + project + location for ADC auth) and forward
-    the recognized fields untouched. ``max_tokens`` is required by Anthropic, so
-    it is always present; we default it defensively.
+
+def _anthropic_create_kwargs(body: dict, model: str) -> dict:
+    """Build ``client.messages.create(**kwargs)`` from an inbound Anthropic body.
+
+    Pass through ONLY the recognized native Anthropic fields that are present in
+    the inbound body (don't fabricate absent ones), plus ``max_tokens`` (default
+    4096 if absent — Anthropic requires it) and the configured Vertex ``model``.
+    We do NOT include ``stream`` (handled separately) and do NOT forward the
+    client's ``model`` (we always route to the configured Vertex model id).
     """
-    args: dict = {
+    kwargs: dict = {
         "model": model,
-        "vertex_project": project,
-        "vertex_location": location,
-        "messages": body.get("messages") or [],
         "max_tokens": int(body.get("max_tokens") or 4096),
-        "stream": bool(body.get("stream")),
+        "messages": body.get("messages") or [],
     }
-    # system: Anthropic allows a bare string OR a list of text blocks; pass through.
-    if body.get("system") is not None:
-        args["system"] = body["system"]
-    # optional generation controls — forward only when present (don't fabricate).
-    for k in ("temperature", "top_p", "top_k", "stop_sequences", "tools",
-              "tool_choice", "metadata"):
+    for k in _NATIVE_PASSTHROUGH_FIELDS:
+        if k == "messages":
+            continue  # already set above (always present)
         if body.get(k) is not None:
-            args[k] = body[k]
-    # ask litellm to surface usage on a streamed response too (so we can capture
-    # the cache split in streaming mode without re-deriving it from text).
-    if args["stream"]:
-        args["stream_options"] = {"include_usage": True}
-    return args
+            kwargs[k] = body[k]
+    return kwargs
 
 
-def _content_blocks_from_choice(message: Any) -> list:
-    """Build Anthropic ``content`` blocks from a litellm choice ``message``.
+def _message_to_anthropic_dict(msg: Any, model: str) -> dict:
+    """Convert an ``AnthropicVertex`` Message -> an Anthropic Messages response dict.
 
-    A litellm message has ``content`` (text, may be None) and ``tool_calls`` (a
-    list of OpenAI tool-call dicts). We emit Anthropic blocks: a ``text`` block
-    for the text (when non-empty) and a ``tool_use`` block per tool call (parsing
-    the JSON arguments string into an ``input`` object). Order: text first, then
-    tool calls — matching how Claude returns interleaved tool use.
+    The native ``client.messages.create(...)`` returns a pydantic ``Message`` whose
+    shape already IS the Anthropic Messages response — so this is mostly a dump.
+    Accepts a pydantic Message (``model_dump()``), a plain dict (a test fake), or
+    an attribute-bearing namespace. Guarantees the keys the rest of the gateway
+    relies on: id, type, role, model, content (text + tool_use blocks with a
+    PARSED ``input`` object), stop_reason, stop_sequence, and a ``usage`` PLAIN
+    DICT (cache split included). The native ``input_tokens`` is ALREADY the
+    UNCACHED count (cache split separate) — keep them as-is; do NOT re-derive.
     """
+    # 1) get a plain dict view of the message (pydantic -> dict -> attrs)
+    if hasattr(msg, "model_dump"):
+        d = msg.model_dump()
+    elif isinstance(msg, dict):
+        d = msg
+    else:
+        d = {
+            "id": getattr(msg, "id", None),
+            "type": getattr(msg, "type", "message"),
+            "role": getattr(msg, "role", "assistant"),
+            "model": getattr(msg, "model", None),
+            "content": getattr(msg, "content", []),
+            "stop_reason": getattr(msg, "stop_reason", None),
+            "stop_sequence": getattr(msg, "stop_sequence", None),
+            "usage": getattr(msg, "usage", {}),
+        }
+
+    # 2) normalize content blocks (each may be a dict, pydantic block, or namespace)
     blocks: list = []
-    text = getattr(message, "content", None)
-    if text is None and isinstance(message, dict):
-        text = message.get("content")
-    if text:
-        blocks.append({"type": "text", "text": text})
+    for blk in (d.get("content") or []):
+        if hasattr(blk, "model_dump"):
+            blk = blk.model_dump()
 
-    tool_calls = getattr(message, "tool_calls", None)
-    if tool_calls is None and isinstance(message, dict):
-        tool_calls = message.get("tool_calls")
-    for tc in (tool_calls or []):
-        fn = getattr(tc, "function", None)
-        if fn is None and isinstance(tc, dict):
-            fn = tc.get("function")
-        name = getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None)
-        raw_args = getattr(fn, "arguments", None)
-        if raw_args is None and isinstance(fn, dict):
-            raw_args = fn.get("arguments")
-        try:
-            tool_input = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-        except (ValueError, TypeError):
-            tool_input = {}
-        tc_id = getattr(tc, "id", None) or (tc.get("id") if isinstance(tc, dict) else None)
-        blocks.append({
-            "type": "tool_use",
-            "id": tc_id or "toolu_unknown",
-            "name": name or "tool",
-            "input": tool_input if isinstance(tool_input, dict) else {},
-        })
-    return blocks
+        def _bg(obj: Any, key: str, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+        btype = _bg(blk, "type")
+        if btype == "text":
+            blocks.append({"type": "text", "text": _bg(blk, "text") or ""})
+        elif btype == "tool_use":
+            tool_input = _bg(blk, "input")
+            if isinstance(tool_input, str):
+                try:
+                    tool_input = json.loads(tool_input)
+                except (ValueError, TypeError):
+                    tool_input = {}
+            blocks.append({
+                "type": "tool_use",
+                "id": _bg(blk, "id") or "toolu_unknown",
+                "name": _bg(blk, "name") or "tool",
+                "input": tool_input if isinstance(tool_input, dict) else {},
+            })
 
+    # 3) usage -> PLAIN dict; native input_tokens is already the UNCACHED count.
+    raw_usage = d.get("usage") or {}
+    if hasattr(raw_usage, "model_dump"):
+        raw_usage = raw_usage.model_dump()
 
-# OpenAI finish_reason -> Anthropic stop_reason
-_STOP_REASON = {
-    "stop": "end_turn",
-    "length": "max_tokens",
-    "tool_calls": "tool_use",
-    "function_call": "tool_use",
-    "content_filter": "end_turn",
-}
+    def _ug(key: str) -> int:
+        if isinstance(raw_usage, dict):
+            v = raw_usage.get(key)
+        else:
+            v = getattr(raw_usage, key, None)
+        return int(v or 0)
 
+    usage = {
+        "input_tokens": _ug("input_tokens"),
+        "output_tokens": _ug("output_tokens"),
+        "cache_creation_input_tokens": _ug("cache_creation_input_tokens"),
+        "cache_read_input_tokens": _ug("cache_read_input_tokens"),
+    }
 
-def litellm_response_to_anthropic(resp: Any, model: str) -> dict:
-    """Map a (non-streaming) litellm ``ModelResponse`` -> an Anthropic Messages dict.
-
-    Preserves ``content`` (text + tool_use blocks), ``stop_reason``, and ``usage``
-    (with the cache split, via ``_usage_obj_to_anthropic``). The shape matches a
-    real ``/v1/messages`` response so Claude Code / the SDK parse it unchanged.
-    """
-    choices = getattr(resp, "choices", None)
-    if choices is None and isinstance(resp, dict):
-        choices = resp.get("choices")
-    choice0 = (choices or [{}])[0]
-    message = getattr(choice0, "message", None)
-    if message is None and isinstance(choice0, dict):
-        message = choice0.get("message")
-    finish = getattr(choice0, "finish_reason", None)
-    if finish is None and isinstance(choice0, dict):
-        finish = choice0.get("finish_reason")
-
-    usage_obj = getattr(resp, "usage", None)
-    if usage_obj is None and isinstance(resp, dict):
-        usage_obj = resp.get("usage")
-    anth_usage = _usage_obj_to_anthropic(usage_obj)
-
-    resp_id = getattr(resp, "id", None) or (resp.get("id") if isinstance(resp, dict) else None)
     return {
-        "id": resp_id or "msg_vertex",
+        "id": d.get("id") or "msg_vertex",
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": _content_blocks_from_choice(message) if message is not None else [],
-        "stop_reason": _STOP_REASON.get((finish or "stop"), "end_turn"),
-        "stop_sequence": None,
-        "usage": anth_usage,
+        "content": blocks,
+        "stop_reason": d.get("stop_reason") or "end_turn",
+        "stop_sequence": d.get("stop_sequence"),
+        "usage": usage,
     }
 
 
@@ -412,15 +364,14 @@ def _sse_event(event: str, data: dict) -> bytes:
 def anthropic_message_to_sse(anth: dict):
     """Emit a CORRECT Anthropic SSE sequence from a COMPLETE Anthropic message dict.
 
-    We buffer the upstream (litellm is called NON-streaming) and re-emit the whole
-    message as SSE. Why buffer instead of translating litellm's streaming chunks:
-    the incremental OpenAI->Anthropic translation of TOOL CALLS is fragile — an
-    ``input_json_delta`` is only valid after a ``tool_use`` ``content_block_start``
-    that carries the tool ``id``+``name``; getting that wrong makes Claude Code
-    report "the model's tool call could not be parsed" and fail the whole run.
-    Building the SSE from the already-correctly-parsed message (text + tool_use
-    blocks with a real ``input`` object, from ``_content_blocks_from_choice``)
-    guarantees every tool call is well-formed.
+    We call AnthropicVertex NON-streaming and re-emit the whole message as SSE.
+    Why buffer instead of streaming through: building the SSE from the already-
+    complete, already-parsed message (text + tool_use blocks with a real ``input``
+    object, from ``_message_to_anthropic_dict``) guarantees every tool call is
+    well-formed — an ``input_json_delta`` is only valid after a ``tool_use``
+    ``content_block_start`` that carries the tool ``id``+``name``, and getting that
+    ordering wrong makes Claude Code report "the model's tool call could not be
+    parsed" and fail the whole run.
 
     Frames:
         message_start -> [per block: content_block_start, *_delta, content_block_stop]
@@ -513,17 +464,32 @@ class UsageSink:
                   f"{type(e).__name__}: {str(e)[:160]}", flush=True)
 
 
-# ── litellm Vertex bridge (lazy) ──────────────────────────────────────────────
-def _vertex_completion(args: dict):
-    """Call ``litellm.completion`` (imported LAZILY) for the Vertex Anthropic model.
+# ── AnthropicVertex native bridge (lazy client, built once) ───────────────────
+def _make_vertex_completion(project: str, location: str):
+    """Build the DEFAULT Vertex completion_fn — a NATIVE ``AnthropicVertex`` call.
 
-    litellm is the ONE heavy dep; importing it here (not at module load) keeps
-    ``import bench.usage_gateway`` and passthrough mode working on a box without
-    litellm. Auth is ADC (Application Default Credentials) — no API key passed;
-    ``vertex_project``/``vertex_location`` in ``args`` select the Vertex endpoint.
+    The ``anthropic`` SDK is the ONE heavy dep; ``AnthropicVertex`` is imported and
+    constructed LAZILY (only on the first request) so ``import bench.usage_gateway``,
+    the tests, and passthrough mode all work on a box without ``anthropic``. The
+    client is thread-safe, so we build it ONCE and reuse it across requests. Auth
+    is ADC (Application Default Credentials) — no API key passed; project/location
+    select the Vertex endpoint.
+
+    Returns a ``completion_fn(kwargs) -> Message`` closure. ``kwargs`` already
+    carries ``model`` (bare id) + the native Anthropic fields; we always call
+    NON-streaming (the gateway re-emits SSE itself off the complete message).
     """
-    import litellm  # lazy — heavy, Vertex-mode only
-    return litellm.completion(**args)
+    cache: dict = {}
+
+    def _complete(kwargs: dict):
+        client = cache.get("client")
+        if client is None:
+            from anthropic import AnthropicVertex  # lazy — heavy, Vertex-mode only
+            client = AnthropicVertex(project_id=project, region=location)
+            cache["client"] = client
+        return client.messages.create(stream=False, **kwargs)
+
+    return _complete
 
 
 # ── the proxy/bridge request handler ──────────────────────────────────────────
@@ -539,22 +505,25 @@ def make_handler(upstream_base: str, sink: UsageSink,
 
     upstream_base   : (passthrough mode) the base URL to forward to verbatim — the
                       arm's compression endpoint or another Anthropic endpoint.
-                      Ignored in Vertex mode (litellm is the upstream).
+                      Ignored in Vertex mode (AnthropicVertex is the upstream).
     sink            : where CallUsage rows are written.
     default_run_id  : run-id tag used when a request carries no RUN_ID_HEADER.
     default_headers : (passthrough mode) extra headers MERGED onto every forwarded
                       request. Incoming client headers win on conflict.
     timeout_s       : per-request upstream timeout (passthrough mode).
-    mode            : ``MODE_VERTEX`` (default — gateway IS the litellm->Vertex
-                      bridge) or ``MODE_PASSTHROUGH`` (forward verbatim upstream).
-    vertex_*        : Vertex routing for litellm (model id, project, location);
-                      auth is ADC on the box (no API key).
-    completion_fn   : injectable litellm.completion (Vertex mode) — defaults to
-                      the lazy ``_vertex_completion``. Tests monkeypatch this.
+    mode            : ``MODE_VERTEX`` (default — gateway IS the AnthropicVertex
+                      native bridge) or ``MODE_PASSTHROUGH`` (forward verbatim
+                      upstream).
+    vertex_*        : Vertex routing (model id, project, location); auth is ADC on
+                      the box (no API key).
+    completion_fn   : injectable Vertex completion (Vertex mode) — a callable
+                      ``fn(create_kwargs) -> Message``. Defaults to a lazily-built
+                      native ``AnthropicVertex`` client (``_make_vertex_completion``).
+                      Tests pass a fake returning a Message-like dict/namespace.
     """
     base = upstream_base.rstrip("/")
     extra_headers = dict(default_headers or {})
-    _complete = completion_fn or _vertex_completion
+    _complete = completion_fn or _make_vertex_completion(vertex_project, vertex_location)
 
     class _Handler(BaseHTTPRequestHandler):
         # silence the default per-request stderr logging (noisy under a pool);
@@ -575,16 +544,18 @@ def make_handler(upstream_base: str, sink: UsageSink,
                 return
             self._passthrough(body, run_id, t0)
 
-        # ── Vertex mode: bridge Anthropic Messages -> litellm.completion -> Vertex
+        # ── Vertex mode: NATIVE passthrough — Anthropic Messages -> AnthropicVertex
         def _bridge_vertex(self, body: bytes, run_id: str, t0: float) -> None:
-            """Translate the inbound Anthropic request, call litellm (Vertex), and
-            relay an Anthropic Messages response (JSON or SSE), capturing usage.
+            """Forward the inbound Anthropic request NATIVELY via AnthropicVertex,
+            then relay an Anthropic Messages response (JSON or SSE), capturing usage.
 
             count_tokens is handled locally (a cheap char-based estimate) so we
             never need a second upstream; the bench prices off the per-CALL usage
-            rows from real messages, not count_tokens. Any translation/litellm
-            error returns a clean Anthropic-shaped error (never a hang); usage we
-            already have is still logged.
+            rows from real messages, not count_tokens. The request IS already
+            Anthropic Messages format and the target IS Anthropic-on-Vertex, so
+            this is a pure passthrough — no foreign-shape translation. Any upstream
+            (AnthropicVertex / ADC) error returns a clean Anthropic-shaped error
+            (never a hang); usage we already have is still logged.
             """
             # /v1/messages/count_tokens — answer locally; no Vertex round-trip.
             if self.path.rstrip("/").endswith("count_tokens"):
@@ -597,30 +568,21 @@ def make_handler(upstream_base: str, sink: UsageSink,
                 self._gateway_error(400, f"bad request JSON: {type(e).__name__}: {str(e)[:120]}")
                 return
 
-            try:
-                args = anthropic_request_to_litellm_args(
-                    req_body, vertex_model, vertex_project, vertex_location)
-            except Exception as e:  # noqa: BLE001 — translation must never hang the run
-                self._gateway_error(400, f"request translation failed: "
-                                    f"{type(e).__name__}: {str(e)[:160]}")
-                return
-
-            # Always call litellm NON-streaming, then re-emit as SSE if the client
-            # asked to stream. Tool-call args parse correctly into an Anthropic
-            # tool_use `input` object only on the complete message; the incremental
-            # streaming translation dropped tool calls -> Claude Code reported "the
-            # model's tool call could not be parsed" and failed the whole run.
+            # Build native create kwargs (bare model id; native fields only). We
+            # always call NON-streaming, then re-emit as SSE if the client asked to
+            # stream — re-emitting off the COMPLETE message guarantees tool_use
+            # blocks carry a parsed `input` object (the streaming path is exact).
+            model = _strip_vertex_prefix(vertex_model)
+            kwargs = _anthropic_create_kwargs(req_body, model)
             client_wants_stream = bool(req_body.get("stream"))
-            args["stream"] = False
-            args.pop("stream_options", None)
             try:
-                resp = _complete(args)
-            except Exception as e:  # noqa: BLE001 — litellm/upstream/ADC error
+                msg = _complete(kwargs)
+            except Exception as e:  # noqa: BLE001 — AnthropicVertex/upstream/ADC error
                 self._gateway_error(502, f"vertex upstream error: "
                                     f"{type(e).__name__}: {str(e)[:200]}")
                 return
 
-            anth = litellm_response_to_anthropic(resp, vertex_model)
+            anth = _message_to_anthropic_dict(msg, model)
             # capture usage ONCE off the complete message (cache split included),
             # BEFORE relaying (durable by the time the client returns).
             try:
@@ -820,7 +782,7 @@ def make_handler(upstream_base: str, sink: UsageSink,
 class UsageGateway:
     """A running gateway: an HTTP server thread + the usage sink it writes to.
 
-    Usage (Vertex mode — the default; the gateway IS the litellm->Vertex bridge):
+    Usage (Vertex mode — the default; the gateway IS the AnthropicVertex bridge):
         gw = UsageGateway(log_dir="runs/usage")          # mode defaults to vertex
         gw.start()
         base_url = gw.base_url          # set ANTHROPIC_BASE_URL to this
@@ -907,13 +869,14 @@ def main() -> None:
                                  "(Vertex bridge or passthrough)")
     ap.add_argument("--mode", default=os.environ.get("CCB_GATEWAY_MODE", MODE_VERTEX),
                     choices=[MODE_VERTEX, MODE_PASSTHROUGH],
-                    help="vertex: litellm->Vertex bridge (default); "
+                    help="vertex: AnthropicVertex native bridge (default); "
                          "passthrough: forward verbatim to --upstream")
     ap.add_argument("--upstream", default=os.environ.get("CCB_GATEWAY_UPSTREAM",
                                                           "https://api.anthropic.com"),
                     help="(passthrough mode) upstream base URL to forward to")
     ap.add_argument("--vertex-model", default=VERTEX_MODEL,
-                    help="(vertex mode) litellm Vertex model id")
+                    help="(vertex mode) Vertex Claude model id "
+                         "(a leading 'vertex_ai/' is stripped for AnthropicVertex)")
     ap.add_argument("--vertex-project", default=VERTEX_PROJECT)
     ap.add_argument("--vertex-location", default=VERTEX_LOCATION)
     ap.add_argument("--log-dir", default=os.environ.get("CCB_GATEWAY_LOG_DIR", "runs/usage"))

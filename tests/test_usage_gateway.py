@@ -16,6 +16,12 @@ Two layers of coverage, both pure-Python (no claude_agent_sdk, no node):
     (urllib), and assert the gateway (a) relayed the body faithfully AND (b) wrote
     the right CallUsage row to the per-run JSONL.
 
+The Vertex-mode tests inject a fake completion_fn (standing in for the native
+AnthropicVertex client) returning a Message-like object, so the suite runs on a
+box WITHOUT the ``anthropic`` SDK installed — including the regression that a
+conversation carrying a tool_result message + tools round-trips natively (JSON
+and SSE) with the tool_use ``input`` a parsed OBJECT and the cache split captured.
+
 Runnable two ways:
     py -m pytest tests/test_usage_gateway.py -q
     py tests/test_usage_gateway.py            # standalone, prints PASS/FAIL
@@ -41,7 +47,7 @@ if str(_ROOT) not in sys.path:
 
 from bench.usage_gateway import (  # noqa: E402
     MODE_PASSTHROUGH, RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
-    anthropic_request_to_litellm_args, litellm_response_to_anthropic,
+    _anthropic_create_kwargs, _strip_vertex_prefix, _message_to_anthropic_dict,
     anthropic_message_to_sse,
 )
 
@@ -229,38 +235,51 @@ def test_gateway_logs_usage_sse_path():
     _through_gateway(stream=True)
 
 
-# ── 4. Vertex mode: mocked litellm.completion -> Anthropic translation ────────
-# A fake litellm Usage object: OpenAI-shaped prompt_tokens is the FULL input
-# (uncached 120 + write 800 + read 5000 = 5920); the Anthropic cache split lives
-# on the private attrs litellm stuffs it into. Our translator must recover the
-# split and re-emit Anthropic's input_tokens (= uncached = 120).
+# ── 4. Vertex mode: mocked AnthropicVertex completion (native passthrough) ────
+# The default completion_fn is now an AnthropicVertex client returning a native
+# pydantic Message; tests inject a fake returning a Message-LIKE object (dict or
+# namespace) whose usage carries the cache split EXACTLY as Anthropic reports it:
+# input_tokens is the UNCACHED count (120), the cache split is separate (write
+# 800, read 5000). No OpenAI-shape, no private-attr recovery — pure passthrough.
 def _fake_usage():
-    u = SimpleNamespace(
-        prompt_tokens=5920, completion_tokens=45,
-        _cache_creation_input_tokens=800, _cache_read_input_tokens=5000,
-        prompt_tokens_details=None,
+    """Anthropic-native usage: input_tokens is already the UNCACHED portion."""
+    return SimpleNamespace(
+        input_tokens=120, output_tokens=45,
+        cache_creation_input_tokens=800, cache_read_input_tokens=5000,
     )
-    return u
 
 
-def _fake_litellm_response():
-    """An OpenAI-shaped litellm ModelResponse with a text reply + the cache split."""
-    msg = SimpleNamespace(content="done", tool_calls=None)
-    choice = SimpleNamespace(message=msg, finish_reason="stop")
-    return SimpleNamespace(id="chatcmpl-x", choices=[choice], usage=_fake_usage())
+def _fake_message():
+    """A Message-like object with a text reply + the Anthropic cache split.
+
+    Mirrors what AnthropicVertex's ``client.messages.create(...)`` returns: native
+    Anthropic ``content`` blocks (a TextBlock-like namespace) and a usage object
+    with the cache split. No ``model_dump`` — exercises the attribute-read path of
+    ``_message_to_anthropic_dict``.
+    """
+    text_block = SimpleNamespace(type="text", text="done")
+    return SimpleNamespace(
+        id="msg_vtx_x", type="message", role="assistant",
+        model="claude-sonnet-4-6", content=[text_block],
+        stop_reason="end_turn", stop_sequence=None, usage=_fake_usage(),
+    )
 
 
-def _fake_litellm_toolcall_response():
-    """An OpenAI-shaped litellm response whose message is a TOOL CALL — args as a
-    JSON STRING, the way OpenAI/litellm return them. The gateway must parse the
-    string into an Anthropic tool_use ``input`` OBJECT; getting this wrong is what
-    made Claude Code report "the model's tool call could not be parsed" and fail
-    the whole run."""
-    fn = SimpleNamespace(name="Bash", arguments='{"command": "ls -la", "timeout": 5}')
-    tc = SimpleNamespace(id="toolu_abc", type="function", function=fn)
-    msg = SimpleNamespace(content=None, tool_calls=[tc])
-    choice = SimpleNamespace(message=msg, finish_reason="tool_calls")
-    return SimpleNamespace(id="chatcmpl-tool", choices=[choice], usage=_fake_usage())
+def _fake_toolcall_message():
+    """A Message-like object whose content is a native Anthropic tool_use block —
+    ``input`` is already a parsed OBJECT (the native SDK never returns a JSON
+    string). The gateway must round-trip it as a well-formed tool_use whose input
+    stays an object; getting this wrong is what made Claude Code report "the
+    model's tool call could not be parsed" and fail the whole run."""
+    tool_block = SimpleNamespace(
+        type="tool_use", id="toolu_abc", name="Bash",
+        input={"command": "ls -la", "timeout": 5},
+    )
+    return SimpleNamespace(
+        id="msg_vtx_tool", type="message", role="assistant",
+        model="claude-sonnet-4-6", content=[tool_block],
+        stop_reason="tool_use", stop_sequence=None, usage=_fake_usage(),
+    )
 
 
 def _parse_sse_blocks(sse_text: str):
@@ -278,41 +297,70 @@ def _parse_sse_blocks(sse_text: str):
     return out
 
 
-def test_anthropic_request_to_litellm_args():
-    """An inbound Anthropic request becomes the right Vertex litellm args."""
+def test_strip_vertex_prefix():
+    """AnthropicVertex wants the BARE model id — the 'vertex_ai/' prefix is stripped."""
+    assert _strip_vertex_prefix("vertex_ai/claude-sonnet-4-6") == "claude-sonnet-4-6"
+    # already-bare ids and unrelated strings pass through untouched
+    assert _strip_vertex_prefix("claude-sonnet-4-6") == "claude-sonnet-4-6"
+    assert _strip_vertex_prefix("") == ""
+
+
+def test_anthropic_create_kwargs_passthrough():
+    """An inbound Anthropic body becomes native AnthropicVertex create kwargs.
+
+    Native fields present in the body pass through verbatim; absent ones are NOT
+    fabricated; ``stream`` is dropped (handled separately); ``model`` is forced to
+    the configured Vertex (bare) id, NOT the client's; ``max_tokens`` defaults.
+    """
     body = {
-        "model": "claude-sonnet-4-5",
+        "model": "claude-sonnet-4-5",                # client's model — IGNORED
         "messages": [{"role": "user", "content": "hi"}],
-        "system": "be terse",
+        "system": [{"type": "text", "text": "be terse",
+                    "cache_control": {"type": "ephemeral"}}],
         "max_tokens": 1024,
         "temperature": 0.2,
-        "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
-        "stream": False,
+        "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
+        "tool_choice": {"type": "auto"},
+        "thinking": {"type": "enabled", "budget_tokens": 1000},
+        "stream": True,                              # handled separately — NOT in kwargs
     }
-    args = anthropic_request_to_litellm_args(
-        body, "vertex_ai/claude-sonnet-4-6", "dasein-473321", "us-east5")
-    assert args["model"] == "vertex_ai/claude-sonnet-4-6"
-    assert args["vertex_project"] == "dasein-473321"
-    assert args["vertex_location"] == "us-east5"
-    assert args["messages"] == body["messages"]
-    assert args["system"] == "be terse"
-    assert args["max_tokens"] == 1024
-    assert args["temperature"] == 0.2
-    assert args["tools"] == body["tools"]
-    assert args["stream"] is False
+    kw = _anthropic_create_kwargs(body, "claude-sonnet-4-6")
+    assert kw["model"] == "claude-sonnet-4-6"        # the configured Vertex model, bare
+    assert kw["messages"] == body["messages"]
+    assert kw["system"] == body["system"]            # cache_control rides through
+    assert kw["max_tokens"] == 1024
+    assert kw["temperature"] == 0.2
+    assert kw["tools"] == body["tools"]
+    assert kw["tool_choice"] == {"type": "auto"}
+    assert kw["thinking"] == {"type": "enabled", "budget_tokens": 1000}
+    # stream is NOT forwarded (the gateway re-emits SSE itself)
+    assert "stream" not in kw
     # ADC auth: no api_key smuggled in
-    assert "api_key" not in args
+    assert "api_key" not in kw
+    # absent native fields are not fabricated
+    assert "top_p" not in kw and "stop_sequences" not in kw and "metadata" not in kw
 
 
-def test_litellm_response_to_anthropic_cache_split():
-    """A litellm response with a cache split relays as Anthropic format + usage."""
-    anth = litellm_response_to_anthropic(_fake_litellm_response(), "vertex_ai/claude-sonnet-4-6")
+def test_anthropic_create_kwargs_defaults_max_tokens():
+    """max_tokens defaults to 4096 when the inbound body omits it."""
+    kw = _anthropic_create_kwargs(
+        {"messages": [{"role": "user", "content": "hi"}]}, "claude-sonnet-4-6")
+    assert kw["max_tokens"] == 4096
+    assert kw["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_message_to_anthropic_dict_cache_split():
+    """A returned Message converts to the Anthropic response dict + usage cache split."""
+    anth = _message_to_anthropic_dict(_fake_message(), "claude-sonnet-4-6")
     assert anth["type"] == "message"
     assert anth["role"] == "assistant"
+    assert anth["model"] == "claude-sonnet-4-6"
     assert anth["stop_reason"] == "end_turn"
     assert anth["content"] == [{"type": "text", "text": "done"}]
-    # Anthropic usage: input_tokens is the UNCACHED portion (120), split separate.
+    # usage is a PLAIN dict; native input_tokens is the UNCACHED count (120), kept
+    # as-is (NOT re-derived); the cache split is separate.
     u = anth["usage"]
+    assert isinstance(u, dict)
     assert u["input_tokens"] == 120
     assert u["output_tokens"] == 45
     assert u["cache_creation_input_tokens"] == 800
@@ -321,19 +369,38 @@ def test_litellm_response_to_anthropic_cache_split():
     _assert_row(extract_usage(u))
 
 
-def _through_vertex_gateway(stream: bool):
-    """A request through a Vertex-mode gateway with a MOCKED litellm.completion.
+def test_message_to_anthropic_dict_accepts_plain_dict():
+    """A dict Message-like (e.g. a model_dump or a raw fake) round-trips too,
+    coercing a missing cache split to 0 and parsing a string tool_use input."""
+    d = {
+        "id": "msg_d", "type": "message", "role": "assistant",
+        "content": [{"type": "tool_use", "id": "toolu_x", "name": "Edit",
+                     "input": '{"path": "a.py"}'}],   # a STRING input — must parse
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 50, "output_tokens": 3},  # no cache split reported
+    }
+    anth = _message_to_anthropic_dict(d, "claude-sonnet-4-6")
+    tu = [b for b in anth["content"] if b["type"] == "tool_use"]
+    assert tu[0]["input"] == {"path": "a.py"}        # parsed object, not a string
+    assert anth["usage"]["cache_creation_input_tokens"] == 0   # None -> 0
+    assert anth["usage"]["cache_read_input_tokens"] == 0
 
-    Asserts the gateway (a) relayed an Anthropic-format response and (b) wrote the
-    right CallUsage row (cache split) to the per-run JSONL — for BOTH the JSON and
-    SSE paths.
+
+def _through_vertex_gateway(stream: bool):
+    """A request through a Vertex-mode gateway with a MOCKED completion_fn.
+
+    The injected completion_fn stands in for the native AnthropicVertex client and
+    returns a Message-like object. Asserts the gateway (a) called it with native
+    create kwargs (bare model id, no foreign routing args, no ``stream``) and (b)
+    relayed an Anthropic-format response + wrote the right CallUsage row (cache
+    split) to the per-run JSONL — for BOTH the JSON and SSE paths.
     """
     tmp = tempfile.mkdtemp(prefix="ccb_gw_vtx_")
     seen = {}
 
-    def fake_completion(args):
-        seen["args"] = args                # capture the translated litellm args
-        return _fake_litellm_response()    # gateway always calls litellm NON-streaming
+    def fake_completion(kwargs):
+        seen["kwargs"] = kwargs            # capture the native create kwargs
+        return _fake_message()             # a native Message-like reply
 
     gw = UsageGateway(log_dir=tmp, default_run_id="rid-v",
                       completion_fn=fake_completion).start()  # mode defaults to vertex
@@ -349,12 +416,15 @@ def _through_vertex_gateway(stream: bool):
         )
         resp = urllib.request.urlopen(req, timeout=10)
         relayed = resp.read()
-        # (a) the mocked completion got Vertex-routed args, ALWAYS non-streaming
-        # (the gateway buffers upstream and re-emits SSE itself — so tool calls
-        # translate correctly off the complete message).
-        assert seen["args"]["model"].startswith("vertex_ai/")
-        assert seen["args"]["vertex_project"]
-        assert seen["args"]["stream"] is False
+        # (a) the mocked completion got native create kwargs: the BARE configured
+        # Vertex model (the leading 'vertex_ai/' stripped), no foreign routing args,
+        # and NO ``stream`` (the gateway buffers + re-emits SSE itself — so tool
+        # calls translate correctly off the complete message).
+        kw = seen["kwargs"]
+        assert kw["model"] == "claude-sonnet-4-6"   # bare id, not the client's model
+        assert "vertex_ai/" not in kw["model"]
+        assert "stream" not in kw
+        assert "vertex_project" not in kw and "vertex_location" not in kw
         # (a') the gateway emitted Anthropic format (JSON message OR SSE events)
         if stream:
             assert resp.headers.get("Content-Type", "").startswith("text/event-stream")
@@ -393,12 +463,13 @@ def test_vertex_gateway_sse_round_trip():
 
 def test_vertex_tool_call_survives_json_and_sse():
     """A model TOOL CALL must round-trip as a well-formed Anthropic tool_use with a
-    PARSED input object — both as JSON and over SSE. Regression: the streaming path
-    dropped tool calls -> Claude Code reported 'the model's tool call could not be
-    parsed' -> the whole run failed (the A0 smoke caught exactly this)."""
-    # (a) non-streaming translation parses the arguments-STRING into an input OBJECT
-    anth = litellm_response_to_anthropic(
-        _fake_litellm_toolcall_response(), "vertex_ai/claude-sonnet-4-6")
+    PARSED input object — both as JSON and over SSE. Regression: the old litellm
+    streaming path dropped tool calls -> Claude Code reported 'the model's tool
+    call could not be parsed' -> the whole run failed (the A0 smoke caught exactly
+    this). The native passthrough preserves the tool_use block + its parsed input."""
+    # (a) the native Message converts to a tool_use block whose input stays an OBJECT
+    anth = _message_to_anthropic_dict(
+        _fake_toolcall_message(), "claude-sonnet-4-6")
     tu = [b for b in anth["content"] if b["type"] == "tool_use"]
     assert len(tu) == 1
     assert tu[0]["name"] == "Bash" and tu[0]["id"] == "toolu_abc"
@@ -418,8 +489,103 @@ def test_vertex_tool_call_survives_json_and_sse():
     assert json.loads(ijd[0]["delta"]["partial_json"]) == {"command": "ls -la", "timeout": 5}
 
 
+def _tool_result_conversation_through_gateway(stream: bool):
+    """A REAL conversation that carries a tool_result message + tools must
+    round-trip through the gateway (JSON and SSE), the tool_use response coming
+    back with its ``input`` a PARSED object and the cache split captured.
+
+    This is the end-to-end regression for the native passthrough: the inbound body
+    is Anthropic-native (a user turn, an assistant ``tool_use`` turn, a user
+    ``tool_result`` turn, plus a ``tools`` array with cache_control), it reaches
+    the completion_fn UNTRANSLATED, and the gateway re-emits the model's tool_use
+    reply faithfully.
+    """
+    tmp = tempfile.mkdtemp(prefix="ccb_gw_tr_")
+    seen = {}
+
+    def fake_completion(kwargs):
+        seen["kwargs"] = kwargs
+        return _fake_toolcall_message()    # model answers with a tool_use
+
+    gw = UsageGateway(log_dir=tmp, default_run_id="rid-tr",
+                      completion_fn=fake_completion).start()
+    try:
+        conversation = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 512,
+            "stream": stream,
+            "system": [{"type": "text", "text": "be terse",
+                        "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "Bash", "description": "run a shell command",
+                       "input_schema": {"type": "object"},
+                       "cache_control": {"type": "ephemeral"}}],
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_prev", "name": "Bash",
+                     "input": {"command": "pwd"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_prev",
+                     "content": "/repo"}]},
+            ],
+        }
+        req = urllib.request.Request(
+            gw.base_url + "/v1/messages",
+            data=json.dumps(conversation).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", RUN_ID_HEADER: "rid-tr"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        relayed = resp.read()
+        # (a) the native fields reached the completion_fn UNTRANSLATED — the
+        # tool_result message + tools + cache_control all rode through verbatim.
+        kw = seen["kwargs"]
+        assert kw["messages"] == conversation["messages"]    # tool_result intact
+        assert kw["tools"] == conversation["tools"]          # tools + cache_control intact
+        assert kw["system"] == conversation["system"]
+        # (b) the model's tool_use reply round-trips with a PARSED input object
+        if stream:
+            assert resp.headers.get("Content-Type", "").startswith("text/event-stream")
+            blocks = _parse_sse_blocks(relayed.decode())
+            tu_start = [d for e, d in blocks
+                        if e == "content_block_start"
+                        and d["content_block"]["type"] == "tool_use"]
+            assert len(tu_start) == 1 and tu_start[0]["content_block"]["name"] == "Bash"
+            ijd = [d for e, d in blocks
+                   if e == "content_block_delta"
+                   and d.get("delta", {}).get("type") == "input_json_delta"]
+            assert json.loads(ijd[0]["delta"]["partial_json"]) == {"command": "ls -la", "timeout": 5}
+        else:
+            obj = json.loads(relayed)
+            tu = [b for b in obj["content"] if b["type"] == "tool_use"]
+            assert len(tu) == 1 and tu[0]["name"] == "Bash"
+            assert tu[0]["input"] == {"command": "ls -la", "timeout": 5}   # OBJECT, not str
+        # (c) the cache split was captured in the usage row
+        path = gw.usage_path("rid-tr")
+        lines: list[str] = []
+        for _ in range(50):
+            if path.exists():
+                lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                if lines:
+                    break
+            time.sleep(0.02)
+        assert len(lines) == 1, f"expected exactly one usage row, got {len(lines)}"
+        _assert_row(json.loads(lines[0]))
+    finally:
+        gw.stop()
+
+
+def test_vertex_tool_result_conversation_json():
+    _tool_result_conversation_through_gateway(stream=False)
+
+
+def test_vertex_tool_result_conversation_sse():
+    _tool_result_conversation_through_gateway(stream=True)
+
+
 def test_vertex_gateway_upstream_error_is_clean():
-    """A litellm error returns a clean Anthropic-shaped error — never a hang."""
+    """An AnthropicVertex/upstream error returns a clean Anthropic-shaped error —
+    never a hang."""
     tmp = tempfile.mkdtemp(prefix="ccb_gw_err_")
 
     def boom(args):
