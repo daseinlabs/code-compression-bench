@@ -28,26 +28,49 @@ Dasein's hosted endpoint compresses server-side. The public repo holds only the 
   `X-Dasein-Api-Key` header.
 
 ## woz — Claude Code MCP server (ToolArm, paid)
-Woz is a paid Claude Code plugin that ships an MCP server. It does **not** compress the
-prompt stream or proxy the model — it changes the agent's **tools**. The arm replaces the
-scaffold's broad shell/grep surface (`replace_tools=True`) with Woz's narrow, index-backed
-trio: `woz_search` (ranked semantic search), `woz_edit` (structured anchor-based edit), and
-`woz_sql` (structured code-index query). Sharper tools → shorter tool calls → fewer big
-`cat`/`grep` dumps in the transcript, so the prompt that accrues across turns stays small.
-That indirect effect is the whole compression mechanism.
+Woz is a paid Claude Code plugin that ships a **real MCP server**
+(`servers/code-server.js` in [github.com/WithWoz/wozcode-plugin](https://github.com/WithWoz/wozcode-plugin)).
+It does **not** compress the prompt stream or proxy the model — it changes the agent's
+**tools**. The arm replaces the scaffold's broad shell/grep surface (`replace_tools=True`)
+with Woz's narrow, index-backed code-query/search/edit surface. Sharper tools → shorter tool
+calls → fewer big `cat`/`grep` dumps in the transcript, so the prompt that accrues across
+turns stays small. That indirect effect is the whole compression mechanism.
 
-- **What it is:** paid plugin (Claude Code MCP server, `node code-server.js`). Not self-host/free.
-- **Env:** `WOZ_API_KEY` (license/account key, required) — passed to the spawned MCP server
-  via its **environment**, never inlined into argv. `WOZ_MCP_CMD` (optional) — the full
-  launch command for the MCP stdio server; if unset the arm reports "not configured" via
-  `ready()` (the runner skips it cleanly instead of crashing).
-- **Run:** install the Woz plugin, then
-  `WOZ_API_KEY=... WOZ_MCP_CMD="node /opt/woz/code-server.js --stdio" make bench ARM=woz`.
-- **TODO (woz-license):** `arms/woz.py::_mcp_server_cmd()` returns `None` by default. Fill in
-  the real launch argv there (e.g. `["node", "/opt/woz/code-server.js", "--stdio"]`) or set
-  `WOZ_MCP_CMD`. The runner spawns it as an stdio subprocess, forwards the env (so
-  `WOZ_API_KEY` reaches it), wires in the `attach()` tools, and tears the process down after.
-- **`ready()`** requires `WOZ_API_KEY` **and** a resolvable launcher (on `PATH` or disk).
+**The tools are discovered live — not hardcoded.** On run start the runner spawns the MCP
+server, performs the MCP handshake (`initialize` + `notifications/initialized`), calls
+`tools/list`, and advertises the **REAL** schemas the server returns to the model. When the
+model calls one, the runner dispatches it over the stdio pipe via `tools/call` and feeds the
+text result back as the observation (bash/non-MCP tools still go to the container env). The
+server is torn down in `finally`. This runs on the **same** mini-swe-agent scaffold as every
+other arm — it is not Claude Code and not a stub. See `bench/mcp_client.py` (the stdio
+JSON-RPC bridge) and `bench/runner.py` (`_spawn_mcp_for_arm`, `_make_mcp_agent_class`).
+
+- **What it is:** paid plugin (Claude Code MCP server, `node servers/code-server.js`). Not self-host/free.
+- **Env:**
+  - `WOZ_API_KEY` (license/account key, **required**) — passed to the spawned MCP server via
+    its **environment**, never inlined into argv.
+  - `WOZ_PLUGIN_DIR` (**required** unless `WOZ_MCP_CMD` is set) — path to a clone of the
+    plugin repo on the runner box (`${CLAUDE_PLUGIN_ROOT}`); the server file is
+    `<WOZ_PLUGIN_DIR>/servers/code-server.js`.
+  - `WOZ_MCP_CMD` (optional override) — a full launch command for the MCP stdio server, used
+    if the plugin layout differs. Wins over the `WOZ_PLUGIN_DIR` default.
+  - `WOZ_NODE` (optional) — pin a specific `node` binary (default: `node` on `PATH`).
+- **Setup on the runner box (Linux):**
+  ```sh
+  git clone https://github.com/WithWoz/wozcode-plugin "$WOZ_PLUGIN_DIR"
+  cd "$WOZ_PLUGIN_DIR" && npm ci   # build the native addon — see the note below
+  ```
+  Node.js is required. The plugin ships a **platform-specific native addon**
+  (`build/Release/queryparser.node` / a `node-gyp` build). It is **not** portable from this
+  Windows dev box — it must be built/run on the **Linux runner** (matching node ABI + arch).
+- **Default launch (reproduces the plugin's `.mcp.json`):**
+  `node --no-warnings=ExperimentalWarning <WOZ_PLUGIN_DIR>/servers/code-server.js`, with the
+  plugin's env (`WOZCODE_MCP_CWD_HOOK_INJECTED=1`, `WOZCODE_POSTHOG_*`) plus `WOZ_API_KEY`
+  forwarded via the **environment**.
+- **Run:** `WOZ_API_KEY=... WOZ_PLUGIN_DIR=/clones/wozcode-plugin make bench ARM=woz`.
+- **`ready()`** requires `WOZ_API_KEY`, a resolvable `node`, **and** the server entrypoint on
+  disk (`<WOZ_PLUGIN_DIR>/servers/code-server.js`) — otherwise it SKIPs with a precise reason
+  (the runner never crashes mid-run on a misconfigured woz).
 
 ## bear — The Token Company API (TransformArm)
 Calls bear's compress API on the message array (`target_ratio = COMPRESSION_TARGET_RATIO`,

@@ -59,17 +59,27 @@ class ArmKind(str, Enum):
 class ToolAttach:
     """What a ToolArm contributes to the scaffold for a run.
 
-    tools           : extra OpenAI-format tool/function specs to advertise to the model
-                      (or replacements for the default scaffold tools).
+    tools           : OpenAI-format tool/function specs to advertise to the model.
+                      For an MCP arm these are a DOCUMENTED FALLBACK only — the
+                      runner discovers the REAL tool schemas from the live
+                      ``tools/list`` of the spawned server and uses those; the
+                      static specs are advertised solely if discovery returns
+                      nothing.
     mcp_server_cmd  : argv for the MCP stdio server to spawn (None if the arm uses
                       a hosted/remote MCP). The runner launches and tears this down.
-    replace_tools   : if True, `tools` REPLACES the scaffold's default tool set;
-                      if False (default), `tools` is appended to it.
+    replace_tools   : if True, the discovered (or fallback) tools REPLACE the
+                      scaffold's default bash tool; if False (default), they are
+                      advertised alongside it.
+    server_env      : extra environment variables to pass to the spawned MCP
+                      server process (merged over a copy of os.environ). Secrets
+                      (API keys) and server config go HERE — never into argv, so
+                      they don't leak into process listings / logs.
     """
 
     tools: list[dict] = field(default_factory=list)
     mcp_server_cmd: Optional[list[str]] = None
     replace_tools: bool = False
+    server_env: dict[str, str] = field(default_factory=dict)
 
 
 class Arm(abc.ABC):

@@ -21,8 +21,11 @@ AND records a CallUsage row off the litellm response the model produced.
     TransformArm  -> arm.transform(messages); the rewritten array is sent to the
                      normal endpoint (client-side compression).
     ProxyArm      -> swap the litellm ``api_base`` + merge ``headers()`` (server-side).
-    ToolArm       -> fold ``attach().tools`` into the model's tool set (MCP spawn
-                     stays a documented TODO).
+    ToolArm       -> spawn ``attach().mcp_server_cmd`` as a real MCP stdio server,
+                     handshake + ``tools/list`` to discover its REAL tools, advertise
+                     those to the model, and dispatch the model's tool calls over the
+                     stdio pipe (``bench.mcp_client``). bash/non-MCP tools still run in
+                     the container env. The server is torn down in finally.
     BaselineArm   -> the control: messages and endpoint pass through unchanged.
 
 Scale-out: a ``ProcessPoolExecutor`` fans the full (instance x arm) grid across
@@ -75,9 +78,32 @@ VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
 
 
 # ── the core scaffold tool (mirrors minisweagent's BASH_TOOL) ────────────────
-# We import the package's own BASH_TOOL lazily inside the run path; ToolArm
-# extras are folded into the model's tool set there. (SEARCH_TOOL is dropped:
-# it needs the proprietary repo index, so the bench uses BASH only — the core.)
+# We import the package's own BASH_TOOL lazily inside the run path. For a ToolArm
+# the REAL tools discovered from the live MCP ``tools/list`` are folded into the
+# model's tool set there (replacing BASH when the arm sets replace_tools). The
+# proprietary SEARCH_TOOL is NOT used: a ToolArm brings its own server-side tools.
+
+
+# ── MCP tool-schema -> OpenAI function-tool spec ─────────────────────────────
+def _mcp_tool_to_openai_spec(tool: dict) -> dict:
+    """Convert a REAL MCP tool schema (from ``tools/list``) into the OpenAI
+    function-tool dict the model expects.
+
+    MCP advertises ``{name, description, inputSchema}`` where ``inputSchema`` is
+    a JSON Schema object; OpenAI/litellm wants
+    ``{"type":"function","function":{"name","description","parameters"}}`` where
+    ``parameters`` IS that JSON Schema. So this is a near-passthrough — we just
+    re-nest under ``function`` and default an empty object schema when absent.
+    """
+    schema = tool.get("inputSchema") or tool.get("input_schema") or {"type": "object", "properties": {}}
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool.get("description", "") or "",
+            "parameters": schema,
+        },
+    }
 
 
 # ── task set loading ─────────────────────────────────────────────────────────
@@ -257,17 +283,36 @@ def _install_arm_seam(model, arm, seam: _SeamState, max_retries: int = 2):
     model.query = wrapped
 
 
-def _make_model(model_name: str, arm, *, max_tokens: int):
+def _make_model(
+    model_name: str,
+    arm,
+    *,
+    max_tokens: int,
+    mcp_tool_specs: Optional[list[dict]] = None,
+    replace_bash: bool = False,
+):
     """Build the v5 LitellmModel (Vertex model_kwargs, cache_control), mirroring
     adaptive_context/eval/mini_swe.py::make_model — minus the proprietary
     AdaptiveLitellmModel/SEARCH_TOOL. The bench advertises ONLY the core BASH_TOOL.
 
-    For a ToolArm, the arm's extra tools are folded into the model's advertised
-    tool set by subclassing the model's ``_query`` (the same hook mini_swe.py
-    uses to add SEARCH_TOOL). For a ProxyArm, api_base + headers are merged into
-    ``model_kwargs`` so the underlying ``litellm.completion`` routes through the
-    arm endpoint.
+    For a ToolArm, ``mcp_tool_specs`` are the REAL OpenAI-format tool specs we
+    derived from the live ``tools/list`` of the spawned MCP server (the caller in
+    ``run_agent`` owns the server lifecycle and passes them in). They are folded
+    into the model's advertised tool set by subclassing the model's ``_query``
+    (the SAME hook mini_swe.py uses to add SEARCH_TOOL). When ``replace_bash`` is
+    True (the woz ``replace_tools`` contract) the native BASH_TOOL is REMOVED so
+    the model can only reach the MCP tools.
+
+    Critically, the stock ``parse_toolcall_actions`` HARD-REJECTS any tool whose
+    name is not ``bash`` (raises FormatError). To let the model call MCP tools we
+    must override the model's action parsing so the tool NAME and raw ARGUMENTS
+    survive onto each action dict; the agent's dispatcher (see ``_McpAgent`` in
+    run_agent) then routes by name to the MCP client vs the bash env.
+
+    For a ProxyArm, api_base + headers are merged into ``model_kwargs`` so the
+    underlying ``litellm.completion`` routes through the arm endpoint.
     """
+    import json as _json  # lazy (local alias; module-level json already imported)
     import litellm  # lazy
     from minisweagent.models.litellm_model import LitellmModel  # lazy
     from minisweagent.models.utils.actions_toolcall import BASH_TOOL  # lazy
@@ -289,7 +334,6 @@ def _make_model(model_name: str, arm, *, max_tokens: int):
     # ProxyArm: route the underlying litellm call through the arm endpoint by
     # merging api_base + extra_headers into model_kwargs (LitellmModel._query
     # does litellm.completion(..., **(model_kwargs | kwargs))).
-    extra_tools: list[dict] = []
     if arm.kind == ArmKind.PROXY:
         base = arm.model_base_url()  # type: ignore[attr-defined]
         if base:
@@ -297,27 +341,58 @@ def _make_model(model_name: str, arm, *, max_tokens: int):
         hdrs = arm.headers() or {}  # type: ignore[attr-defined]
         if hdrs:
             mk["extra_headers"] = hdrs
-    elif arm.kind == ArmKind.TOOL:
-        attach = arm.attach()  # type: ignore[attr-defined]
-        extra_tools = list(attach.tools or [])
-        # TODO(woz): spawn attach.mcp_server_cmd as a stdio MCP server and bridge
-        # its tools in here; tear it down after the run. Stubbed until the woz
-        # server command lands (documented seam, same as the prior runner).
 
-    if extra_tools:
-        # Fold the arm's tools into the model's advertised tool set the same way
-        # mini_swe.py's AdaptiveLitellmModel adds SEARCH_TOOL: override _query.
-        tools = [BASH_TOOL] + extra_tools
+    if mcp_tool_specs:
+        # Advertised tool set: MCP tools, plus BASH unless the arm replaces it.
+        tools = list(mcp_tool_specs) if replace_bash else [BASH_TOOL] + list(mcp_tool_specs)
+        mcp_names = {t["function"]["name"] for t in mcp_tool_specs}
 
         class _ToolLitellmModel(LitellmModel):
             def _query(self, messages, **kwargs):
+                # Same hook mini_swe.py uses for SEARCH_TOOL — advertise the live
+                # MCP tools (and BASH unless replaced) on every completion.
                 return litellm.completion(
                     model=self.config.model_name, messages=messages,
                     tools=tools, **(self.config.model_kwargs | kwargs))
 
-        return _ToolLitellmModel(model_name=model_name, set_cache_control=cache, model_kwargs=mk)
+            def _parse_actions(self, response):
+                # Override the stock bash-only parser. The stock
+                # parse_toolcall_actions raises FormatError on any non-bash tool
+                # and drops the tool name; we keep name + arguments so the agent
+                # can dispatch MCP calls to the MCP client. We still emit a
+                # FormatError-shaped message when the model returns NO tool call
+                # (so the scaffold's format-error handling is unchanged).
+                from minisweagent.exceptions import FormatError  # lazy
+                msg = response.choices[0].message
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if not tool_calls:
+                    raise FormatError({
+                        "role": "user",
+                        "content": ("No tool calls found in the response. Every "
+                                    "response MUST include at least one tool call."),
+                        "extra": {"interrupt_type": "FormatError"},
+                    })
+                actions: list[dict] = []
+                for tc in tool_calls:
+                    tname = tc.function.name
+                    try:
+                        targs = _json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        targs = {}
+                    if not isinstance(targs, dict):
+                        targs = {}
+                    action = {"tool_call_id": tc.id, "tool_name": tname, "tool_args": targs}
+                    if tname == "bash":
+                        # Keep the native shape too: env.execute reads "command".
+                        action["command"] = targs.get("command", "")
+                    actions.append(action)
+                return actions
 
-    return LitellmModel(model_name=model_name, set_cache_control=cache, model_kwargs=mk)
+        return _ToolLitellmModel(
+            model_name=model_name, set_cache_control=cache, model_kwargs=mk,
+        ), mcp_names
+
+    return LitellmModel(model_name=model_name, set_cache_control=cache, model_kwargs=mk), set()
 
 
 def _load_swebench_config() -> dict:
@@ -344,6 +419,87 @@ def _fetch_instance(instance_id: str, dataset: str, split: str) -> dict:
     except Exception:
         pass
     return {"instance_id": instance_id}
+
+
+# ── MCP server lifecycle + tool discovery for a ToolArm ──────────────────────
+def _spawn_mcp_for_arm(attach, *, cwd: Optional[str]):
+    """Spawn the arm's MCP server, handshake, and discover its REAL tools.
+
+    Returns ``(client, openai_specs, mcp_names)``. ``openai_specs`` are the live
+    tools converted to OpenAI function-tool dicts (advertised to the model);
+    ``mcp_names`` is the set of names the agent dispatcher routes to the MCP
+    client (everything else falls through to the bash env).
+
+    Falls back to the arm's documented static tool specs (``attach.tools``) ONLY
+    if discovery fails AND the arm provided them — so the bench still has a tool
+    surface to advertise rather than crashing. On any spawn/handshake failure the
+    client is closed and the exception propagates (surfaces as an infra failure
+    the worker retries once).
+    """
+    from bench.mcp_client import MCPClient, merged_env  # lazy (stdlib-only, but keep imports tidy)
+
+    client = MCPClient()
+    # The API key + server env reach the child via the ENVIRONMENT, never argv.
+    # The arm exposes them on the ToolAttach; merge over a copy of os.environ.
+    extra_env = dict(getattr(attach, "server_env", None) or {})
+    env = merged_env(extra_env)
+    try:
+        client.spawn(list(attach.mcp_server_cmd), env=env, cwd=cwd)
+        live_tools = client.list_tools()
+    except Exception:
+        client.close()
+        raise
+    if live_tools:
+        specs = [_mcp_tool_to_openai_spec(t) for t in live_tools]
+    else:
+        # Discovery returned nothing: fall back to the arm's static mirrors if it
+        # documented any (woz keeps none by default), else advertise nothing.
+        specs = list(attach.tools or [])
+    mcp_names = {s["function"]["name"] for s in specs}
+    return client, specs, mcp_names
+
+
+def _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names: set, exec_timeout_s: int):
+    """Build a DefaultAgent subclass that DISPATCHES tool calls by name.
+
+    The only change vs the stock agent is ``execute_actions``: each parsed action
+    carries ``tool_name``/``tool_args`` (see _ToolLitellmModel._parse_actions).
+    An action whose name is an MCP tool is serviced by ``mcp_client.call_tool``
+    and its text becomes the observation ``output``; every other action (bash,
+    or any non-MCP tool) falls through to ``self.env.execute`` exactly as before.
+    Observations are then formatted by the stock ``format_observation_messages``
+    (keyed by ``tool_call_id``), so the transcript shape is byte-identical to a
+    normal run — only the SOURCE of an observation differs.
+    """
+
+    class _McpAgent(DefaultAgent):  # type: ignore[valid-type, misc]
+        def execute_actions(self, message: dict) -> list[dict]:
+            actions = (message.get("extra", {}) or {}).get("actions", []) or []
+            outputs: list[dict] = []
+            for action in actions:
+                name = action.get("tool_name")
+                if name in mcp_names:
+                    try:
+                        text = mcp_client.call_tool(
+                            name, action.get("tool_args", {}),
+                            timeout_s=float(exec_timeout_s) if exec_timeout_s else 120.0,
+                        )
+                        outputs.append({"output": text, "returncode": 0, "exception_info": ""})
+                    except Exception as e:  # noqa: BLE001 — surface as an observation, never crash the loop
+                        outputs.append({
+                            "output": "",
+                            "returncode": -1,
+                            "exception_info": f"MCP tool '{name}' failed: {e}",
+                            "extra": {"exception_type": type(e).__name__, "exception": str(e)[:300]},
+                        })
+                else:
+                    # bash / non-MCP tool: the real env executes it (unchanged path).
+                    outputs.append(self.env.execute(action))
+            return self.add_messages(
+                *self.model.format_observation_messages(
+                    message, outputs, self.get_template_vars()))
+
+    return _McpAgent
 
 
 # ── the fixed agent loop (now the REAL minisweagent.DefaultAgent) ─────────────
@@ -374,7 +530,39 @@ def run_agent(
     seam.wall_cap_s = float(wall_cap_s)
 
     arm.setup()
-    model_obj = _make_model(model, arm, max_tokens=max_tokens)
+
+    # ── ToolArm: spawn the REAL MCP server, discover its REAL tools ───────────
+    # The MCP server is launched here (run scope) so its lifecycle is owned by
+    # run_agent and torn down in the finally below — even on a wall-cap/infra
+    # abort. Tools come from the live tools/list, NOT a hardcoded mirror.
+    mcp_client = None
+    mcp_specs: list[dict] = []
+    mcp_names: set = set()
+    replace_bash = False
+    if arm.kind == ArmKind.TOOL:
+        attach = arm.attach()  # type: ignore[attr-defined]
+        if attach.mcp_server_cmd:
+            # Index against the same repo the agent edits. The swebench env runs
+            # in a container, so the server's cwd is the launch cwd (the runner
+            # box working dir); a server that needs the repo path reads it via
+            # its own cwd hook / env. We pass the process cwd (None => inherit).
+            mcp_client, mcp_specs, mcp_names = _spawn_mcp_for_arm(attach, cwd=None)
+        else:
+            # No server command (e.g. a hosted MCP we don't spawn): there is
+            # nothing for the runner to dispatch tool calls TO. Advertising tools
+            # the agent can't reach would just produce dead tool calls, so we
+            # advertise nothing extra and keep the native bash surface.
+            mcp_specs = []
+            mcp_names = set()
+        # replace_tools (the woz contract): drop BASH so the model can only reach
+        # the MCP tools — but ONLY when we have a live client AND discovered tools
+        # to dispatch to (never strand the agent with no reachable tool).
+        replace_bash = bool(attach.replace_tools) and bool(mcp_specs) and mcp_client is not None
+
+    model_obj, _model_mcp_names = _make_model(
+        model, arm, max_tokens=max_tokens,
+        mcp_tool_specs=(mcp_specs or None), replace_bash=replace_bash,
+    )
     _install_arm_seam(model_obj, arm, seam)
 
     instance = _fetch_instance(instance_id, dataset, split)
@@ -403,8 +591,13 @@ def run_agent(
 
     env = get_sb_environment(config, instance)
     agent = None
+    # When an MCP server is live, drive the dispatch-aware agent so MCP tool
+    # calls route to the MCP client and bash/non-MCP tools route to the env.
+    AgentClass = DefaultAgent
+    if mcp_client is not None and mcp_names:
+        AgentClass = _make_mcp_agent_class(DefaultAgent, mcp_client, mcp_names, exec_timeout_s)
     try:
-        agent = DefaultAgent(model_obj, env, **agent_cfg)
+        agent = AgentClass(model_obj, env, **agent_cfg)
         info = agent.run(task=instance.get("problem_statement", "") or f"Fix instance {instance_id}")
         exit_status = info.get("exit_status", "?") or "?"
         patch = info.get("submission", "") or ""
@@ -435,6 +628,13 @@ def run_agent(
             pass
         raise RunInfraError(str(e)[:300]) from e
     finally:
+        # tear down the MCP server first (it may hold the repo / a child node
+        # proc); robust to a hung/dead server — close() never blocks the run.
+        if mcp_client is not None:
+            try:
+                mcp_client.close()
+            except Exception:
+                pass
         try:
             env.cleanup()
         except Exception:
