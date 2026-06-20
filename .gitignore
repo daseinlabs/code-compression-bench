@@ -24,6 +24,10 @@ traj/
 *.log
 .cache/
 
+# Edgee fork build output (clone of edgee-ai/edgee + cargo target/; rebuilt on the
+# runner box from selfhost/edgee/anthropic_upstream.patch — never committed).
+selfhost/edgee/build/
+
 # OS
 .DS_Store
 Thumbs.db
