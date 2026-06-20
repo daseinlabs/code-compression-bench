@@ -216,6 +216,17 @@ class _ArmConfig:
         self.disallowed_tools: list[str] = []
         self.agents: dict = {}
         self.setup_arm = None
+        # ── OPTIONAL harness-level hook wiring (see _build_harness_hooks) ────
+        # Populated per-solve from an arm's optional hook overrides. Empty for
+        # arms that override nothing (baseline / proxy / woz) — those reach the
+        # SDK byte-for-byte as before.
+        #   system_prompt_append : text appended to Claude Code's system prompt
+        #                          at step 0 (from arm.step0_injection). None = none.
+        #   sdk_hooks            : ClaudeAgentOptions.hooks dict (PreToolUse for
+        #                          arm.pre_tool_hook, Stop for arm.stop_decision).
+        #                          None when the arm declares no tool/stop hook.
+        self.system_prompt_append: Optional[str] = None
+        self.sdk_hooks: Optional[dict] = None
 
 
 def _woz_mcp_server_config(attach) -> Optional[dict]:
@@ -315,6 +326,116 @@ def build_arm_config(arm) -> _ArmConfig:
 # product, not the product. Bare/hosted-MCP arms get no synthesized subagent either.
 
 
+# ── OPTIONAL harness-level hooks (step0 / pre-tool / stop) ────────────────────
+def _build_harness_hooks(arm, arm_cfg: "_ArmConfig", instance: dict, repo_dir: str) -> None:
+    """Translate an arm's OPTIONAL harness-level hooks into SDK wiring on arm_cfg.
+
+    An arm may declare three harness-level behaviours the Claude Agent SDK
+    supports, WITHOUT touching this runner's core (so independent arm fixes only
+    edit their own module):
+
+      (1) ``step0_injection(instance, repo_dir) -> str|None``
+            -> appended to Claude Code's system prompt via the SDK
+               ``system_prompt`` = ``{"type":"preset","preset":"claude_code",
+               "append": <text>}`` preset, so the brief/TOC lands at step 0 and
+               persists for the run. (Recorded on ``arm_cfg.system_prompt_append``;
+               _run_sdk turns it into the preset.)
+      (2) ``pre_tool_hook(tool_name, tool_input) -> {"tool_input":{...}}|None``
+            -> a ``PreToolUse`` hook (HookMatcher with no matcher == all tools).
+               A returned ``tool_input`` becomes the SDK's ``updatedInput`` so the
+               REWRITTEN call runs (e.g. RTK: Bash 'git status' -> 'rtk git
+               status'); the call is always ALLOWED — this routes, never blocks.
+      (3) ``stop_decision(transcript_state) -> StopDecision|None``
+            -> a ``Stop`` hook. ``finalize=False`` returns ``{"decision":"block",
+               "reason": directive}`` so the agent CONTINUES with the arm's
+               steering; ``finalize=True`` (or None) lets the loop stop. When the
+               SDK reports the stop is already a forced continuation
+               (``stop_hook_active``) we always allow the stop — a buggy arm can't
+               pin the agent in an infinite loop.
+
+    Arms that override NOTHING (baseline / proxy / woz) leave ``arm_cfg`` untouched
+    here, so their SDK options are byte-for-byte what they were before. The hook
+    callbacks are async (the SDK requires awaitables) and call the arm's SYNC
+    methods directly — the methods are cheap, in-process decisions.
+    """
+    if not arm.has_harness_hooks():
+        return
+
+    # (1) step0 injection -> system-prompt append (recorded; preset built in _run_sdk).
+    try:
+        step0 = arm.step0_injection(instance, repo_dir)
+    except Exception as e:  # noqa: BLE001 — an arm hook must never crash the solve
+        print(f"  WARN: {arm.name}.step0_injection raised: "
+              f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+        step0 = None
+    if step0:
+        arm_cfg.system_prompt_append = str(step0)
+
+    # The SDK is imported lazily (the dev box has no SDK); HookMatcher only exists
+    # when there ARE hooks to build. If the import fails, skip hook wiring rather
+    # than crash — step0 (which needs no SDK type) is already recorded above.
+    try:
+        from claude_agent_sdk import HookMatcher  # lazy
+    except Exception:
+        return
+
+    hooks: dict = {}
+
+    # (2) PreToolUse -> rewrite/observe (no matcher == every tool).
+    if _arm_overrides(arm, "pre_tool_hook"):
+        async def _pre_tool(input_data, tool_use_id, context):  # noqa: ANN001
+            tool_name = input_data.get("tool_name", "")
+            tool_input = input_data.get("tool_input", {}) or {}
+            try:
+                res = arm.pre_tool_hook(tool_name, dict(tool_input))
+            except Exception as e:  # noqa: BLE001
+                print(f"  WARN: {arm.name}.pre_tool_hook raised: "
+                      f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+                res = None
+            spec: dict = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+            if isinstance(res, dict) and res.get("tool_input") is not None:
+                spec["updatedInput"] = res["tool_input"]
+            return {"hookSpecificOutput": spec}
+
+        hooks["PreToolUse"] = [HookMatcher(hooks=[_pre_tool])]
+
+    # (3) Stop -> finalize/continue loop control.
+    if _arm_overrides(arm, "stop_decision"):
+        async def _stop(input_data, tool_use_id, context):  # noqa: ANN001
+            # Already a forced continuation? Let it stop — never pin the agent.
+            if input_data.get("stop_hook_active"):
+                return {}
+            state = {
+                "stop_hook_active": bool(input_data.get("stop_hook_active")),
+                "session_id": input_data.get("session_id"),
+                "cwd": input_data.get("cwd"),
+            }
+            try:
+                dec = arm.stop_decision(state)
+            except Exception as e:  # noqa: BLE001
+                print(f"  WARN: {arm.name}.stop_decision raised: "
+                      f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+                dec = None
+            # None / finalize -> allow the stop (empty output). Continue -> block.
+            if dec is not None and not getattr(dec, "finalize", True):
+                out: dict = {"decision": "block"}
+                directive = getattr(dec, "directive", None)
+                if directive:
+                    out["reason"] = str(directive)
+                return out
+            return {}
+
+        hooks["Stop"] = [HookMatcher(hooks=[_stop])]
+
+    arm_cfg.sdk_hooks = hooks or None
+
+
+def _arm_overrides(arm, name: str) -> bool:
+    """Whether ``arm`` overrides the optional hook ``name`` away from Arm's no-op."""
+    from bench.arm import Arm
+    return getattr(type(arm), name) is not getattr(Arm, name)
+
+
 # ── the prompt the agent is given ─────────────────────────────────────────────
 def _build_task_prompt(instance: dict, instance_id: str, repo_dir: str) -> str:
     """The single user prompt that kicks off the headless solve.
@@ -381,6 +502,18 @@ async def _run_sdk(
     env.update(env_overrides or {})
 
     has_plugins = bool(arm_cfg.plugins)
+    # OPTIONAL harness-level hooks (from an arm's step0 / pre-tool / stop overrides).
+    # arm_cfg.sdk_hooks is a ClaudeAgentOptions.hooks dict; system_prompt_append is
+    # the step0 brief. Both are None for arms that override nothing.
+    sdk_hooks = getattr(arm_cfg, "sdk_hooks", None)
+    sys_append = getattr(arm_cfg, "system_prompt_append", None)
+    # step0 injection -> a claude_code system-prompt PRESET with an `append`, so the
+    # arm's brief/TOC lands at turn 0 and persists. Left None (stock prompt) when no
+    # arm injects anything — baseline/proxy/woz are unaffected.
+    system_prompt = (
+        {"type": "preset", "preset": "claude_code", "append": sys_append}
+        if sys_append else None
+    )
     options = ClaudeAgentOptions(
         allowed_tools=arm_cfg.allowed_tools,
         disallowed_tools=arm_cfg.disallowed_tools,
@@ -392,6 +525,11 @@ async def _run_sdk(
         # load a vendor's REAL plugin (Woz): its subagents/MCP/hooks/skills activate
         # as shipped. None for every other arm.
         plugins=arm_cfg.plugins or None,
+        # an arm's harness-level hooks (PreToolUse rewrite / Stop loop-control). None
+        # for arms that declare none — the SDK call is then identical to before.
+        hooks=sdk_hooks,
+        # an arm's step0 brief appended to the stock claude_code system prompt.
+        system_prompt=system_prompt,
         env=env,
         # headless: never block on a permission prompt — auto-accept tool use so
         # the agent runs unattended (this is a sandboxed per-task container).
@@ -400,8 +538,9 @@ async def _run_sdk(
         # only enforce it when we are NOT loading a plugin (else Woz's `code` server
         # would be suppressed and the agent would have no tools).
         strict_mcp_config=not has_plugins,
-        # let the plugin's own hooks (session/cwd-inject/telemetry) fire.
-        include_hook_events=has_plugins,
+        # surface hook lifecycle events in the stream when EITHER a plugin ships its
+        # own hooks OR an arm declared harness-level hooks (so they actually fire).
+        include_hook_events=has_plugins or bool(sdk_hooks),
     )
 
     messages: list[dict] = []
@@ -554,6 +693,11 @@ def run_agent(
 
     instance = _fetch_instance(instance_id, dataset, split)
     prompt = _build_task_prompt(instance, instance_id, repo_dir)
+
+    # OPTIONAL: translate the arm's harness-level hooks (step0 inject / pre-tool
+    # rewrite / stop decision) into SDK wiring on arm_cfg. No-op for arms that
+    # override none of them (baseline / proxy / woz) — their options are unchanged.
+    _build_harness_hooks(arm, arm_cfg, instance, repo_dir)
 
     # The gateway is ALWAYS the bottom bridge to Vertex (claude-sonnet on Vertex
     # via litellm + ADC). It captures the real post-compression usage regardless

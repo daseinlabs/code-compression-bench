@@ -46,6 +46,37 @@ Message = dict
 Messages = list[Message]
 
 
+# ── stop-decision return type (the loop-stop hook contract) ──────────────────
+@dataclass
+class StopDecision:
+    """An arm's verdict when the agent tries to end its turn loop.
+
+    Returned by ``Arm.stop_decision`` and consulted by the runner's Stop hook
+    each time the agent would stop:
+
+      finalize=True   — let the loop END (the agent's work is accepted). The
+                        runner's Stop hook allows the stop.
+      finalize=False  — KEEP the loop going (CONTINUE). The runner's Stop hook
+                        BLOCKS the stop and feeds ``directive`` back to the agent
+                        as the reason it must continue (e.g. Dasein's submit
+                        adjudicator telling the agent its diff is incomplete).
+
+    ``directive`` is only meaningful when finalize is False; it is the steering
+    text the agent receives. Returning ``None`` from ``stop_decision`` (the
+    default) means the arm abstains and the loop stops normally.
+    """
+
+    finalize: bool
+    directive: Optional[str] = None
+
+
+# A PreToolUse rewrite/observation result. An arm's ``pre_tool_hook`` returns a
+# dict ``{"tool_input": {...}}`` to REWRITE the call's input, or None to leave the
+# call untouched (pure observation). The runner translates a returned tool_input
+# into the SDK's ``updatedInput`` PreToolUse output. Aliased for signature clarity.
+PreToolResult = Optional[dict]
+
+
 class ArmKind(str, Enum):
     """Which adapter pattern an arm implements (selects the runner's wiring)."""
 
@@ -129,6 +160,82 @@ class Arm(abc.ABC):
     def teardown(self) -> None:
         """Optional cleanup after a batch of runs (e.g. close a session/MCP).
         No-op by default."""
+
+    # ── OPTIONAL harness-level hooks (default no-ops) ────────────────────────
+    # These let an arm declare behaviour the Claude Agent SDK supports at the
+    # harness level — a turn-0 system-prompt injection, a PreToolUse rewrite, and
+    # a loop-stop decision — WITHOUT editing cc_runner's core. The runner wires
+    # whichever an arm overrides into ClaudeAgentOptions; arms that don't override
+    # them (baseline / proxy / woz) are wired EXACTLY as before. Keeping them on
+    # the base (not a mixin) means every pattern can opt in independently, so arm
+    # fixes that only touch their own module can proceed in parallel.
+
+    def step0_injection(self, instance: dict, repo_dir: str) -> Optional[str]:
+        """Text to prepend to the agent's FIRST turn (step 0).
+
+        Returned text is appended to Claude Code's system prompt for this solve
+        via ``ClaudeAgentOptions.system_prompt`` = a ``{"type":"preset",
+        "preset":"claude_code","append": <text>}`` preset, so it lands BEFORE the
+        task prompt and persists for the whole run. Use for a cold-retrieval
+        brief: Dasein's scout blast-radius + the repo TOC injected at turn 0.
+
+        ``instance`` is the SWE-bench instance dict (problem_statement + repo
+        info); ``repo_dir`` is the agent's cwd (the checked-out repo). Return
+        ``None`` (the default) to add nothing — the agent runs with the stock
+        Claude Code system prompt, unchanged.
+        """
+        return None
+
+    def pre_tool_hook(self, tool_name: str, tool_input: dict) -> PreToolResult:
+        """A PreToolUse hook: observe or REWRITE a tool call before it runs.
+
+        Called by the runner's PreToolUse hook for every tool the agent invokes,
+        with the tool's name and its parsed input dict. Return:
+
+          * a dict ``{"tool_input": {...new input...}}`` to REWRITE the call —
+            e.g. RTK rewriting ``Bash {"command":"git status"}`` to
+            ``Bash {"command":"rtk git status"}`` so the compressed wrapper runs;
+          * ``None`` (the default) to leave the call untouched (pure observation,
+            or a tool this arm doesn't intercept).
+
+        The runner translates a returned ``tool_input`` into the SDK's
+        ``updatedInput`` PreToolUse output and always ALLOWS the (possibly
+        rewritten) call — this hook routes/observes, it never blocks tools.
+        """
+        return None
+
+    def stop_decision(self, transcript_state: dict) -> Optional[StopDecision]:
+        """A loop-stop/continue decision consulted when the agent tries to stop.
+
+        Called by the runner's Stop hook each time the agent would end its turn
+        loop. ``transcript_state`` carries what the harness knows at that point
+        (e.g. ``{"stop_hook_active": bool, "session_id": str, "cwd": str}``);
+        arms read what they need and ignore the rest. Return:
+
+          * a ``StopDecision(finalize=True)`` to let the loop END;
+          * a ``StopDecision(finalize=False, directive=...)`` to KEEP going —
+            the runner BLOCKS the stop and feeds ``directive`` back to the agent
+            (Dasein's submit adjudicator: FINALIZE vs CONTINUE-with-steering);
+          * ``None`` (the default) to abstain — the loop stops normally.
+
+        The runner guards against infinite continuation: when the SDK reports the
+        stop is ALREADY a forced continuation (``stop_hook_active``), it lets the
+        loop stop regardless, so a buggy arm can't pin the agent forever.
+        """
+        return None
+
+    def has_harness_hooks(self) -> bool:
+        """Whether this arm overrides ANY of the optional harness-level hooks.
+
+        The runner uses this to decide if it must build a hooks/system-prompt
+        wiring at all (and to flip ``include_hook_events`` on). True iff at least
+        one of ``step0_injection`` / ``pre_tool_hook`` / ``stop_decision`` is
+        overridden away from the base no-op. Arms never need to override this.
+        """
+        return any(
+            getattr(type(self), name) is not getattr(Arm, name)
+            for name in ("step0_injection", "pre_tool_hook", "stop_decision")
+        )
 
 
 # ── pattern (a): client-side message transform ──────────────────────────────
