@@ -183,6 +183,27 @@ def test_already_wrapped_not_double_wrapped():
     assert arm.pre_tool_hook("Bash", {"command": "rtk git status"}) is None
 
 
+def test_rtk_subcommand_only_tokens_not_wrapped():
+    """Faithfulness narrowing: rtk's own SUBCOMMANDS (``rtk smart``/``rtk json``/
+    ``rtk env``/...) and the bash builtin ``read`` are NOT standalone host binaries
+    the agent shells out to, so we must NOT prepend ``rtk `` to a bare ``env``/
+    ``log``/``json``/``read`` line — that would wrap an UNRELATED host command (the
+    POSIX ``env`` utility, a project ``log`` script). The real rtk hook keys on its
+    recognized wrappable EXECUTABLES, not its own subcommand verbs."""
+    arm = RtkArm()
+    for cmd in (
+        "read -r line < file",        # bash builtin (agent uses native Read tool)
+        "env",                        # POSIX env utility, NOT `rtk env`
+        "env FOO=bar python x.py",    # env as a launcher prefix
+        "json",                       # `rtk json` is a subcommand, not a host bin
+        "log show",                   # a project/host `log`, not `rtk log`
+        "deps",                       # `rtk deps` subcommand
+        "smart src/",                 # `rtk smart` subcommand
+        "summary",                    # `rtk summary` subcommand
+    ):
+        assert arm.pre_tool_hook("Bash", {"command": cmd}) is None, cmd
+
+
 def test_unsafe_shell_forms_untouched():
     """A single ``rtk `` prefix is only correct for a bare leading command; pipes,
     chains, subshells and env-assignments are left untouched (rtk's hook no-ops)."""

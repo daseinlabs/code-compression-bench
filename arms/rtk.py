@@ -34,14 +34,19 @@ with no extra accounting.
 RECOGNIZED BASE COMMANDS (faithful to the product surface)
 ----------------------------------------------------------
 RTK wraps these command families (per the product README): git, gh; the file
-tools ls/cat/read/grep/find/tree/diff/smart; the test runners pytest/jest/
-vitest/playwright/rspec/rake plus ``cargo test``/``go test``; build/lint
-cargo/tsc/next/prettier/eslint/biome/ruff/golangci-lint/rubocop; package
-managers pnpm/pip/bundle/prisma; cloud/containers docker/kubectl/aws/oc; and
-utilities json/deps/env/log/curl/wget/summary. We only prepend ``rtk `` for a
-command whose FIRST token is one rtk recognizes — anything else (cd, mkdir,
-python, make, source, &&-chains we can't safely split, ...) is left untouched,
-mirroring the real hook (it no-ops on commands it doesn't support).
+tools ls/cat/grep/rg/find/tree/diff; the test runners pytest/jest/vitest/
+playwright/rspec/rake plus ``cargo test``/``go test``; build/lint cargo/tsc/
+next/prettier/eslint/biome/ruff/golangci-lint/rubocop; package managers pnpm/
+pip/bundle/prisma; cloud/containers docker/kubectl/aws/oc; and the network
+utilities curl/wget. These are all real HOST EXECUTABLES the agent shells out
+to — we deliberately do NOT wrap ``read`` (a bash builtin; the agent uses the
+native Read tool, which bypasses rtk) or rtk's own SUBCOMMANDS (smart/json/
+deps/env/log/summary — they're ``rtk smart``/``rtk json``, not standalone host
+binaries, so fronting a bare ``env``/``log`` line would wrap an unrelated host
+command). We only prepend ``rtk `` for a command whose FIRST token is one of
+this recognized set — anything else (cd, mkdir, python, make, source, &&-chains
+we can't safely split, ...) is left untouched, mirroring the real hook (it
+no-ops on commands it doesn't support).
 
 CLEAN-ROOM
 ----------
@@ -87,12 +92,25 @@ def _rtk_bin() -> str:
 # command's FIRST token is one of these, mirroring rtk's own hook (a no-op on
 # unsupported commands). Multi-word forms like ``cargo test`` / ``go test`` are
 # still keyed on the first token (``cargo`` / ``go``); rtk dispatches the sub-verb.
+#
+# We list ONLY real HOST EXECUTABLES the agent actually shells out to — the
+# programs whose stdout rtk wraps when fronted (``rtk git status`` runs git and
+# compresses its output). We deliberately EXCLUDE:
+#   * ``read`` — a bash *builtin*; the agent inspects files via the native Read
+#     tool (which bypasses rtk), never a bare ``read ...`` shell line, so wrapping
+#     it would only mis-fire on the rare builtin use;
+#   * ``smart``/``json``/``deps``/``env``/``log``/``summary`` — these are rtk's own
+#     SUBCOMMANDS (``rtk smart``, ``rtk json``), NOT standalone host binaries the
+#     agent types. Prepending ``rtk `` to a bare ``env`` or ``log`` line would wrap
+#     an *unrelated* host command (the POSIX ``env`` utility, a project ``log``
+#     script), which the real rtk hook would never do. Narrowing to true host
+#     executables keeps the rewrite faithful to rtk's recognized wrappable set.
 _RTK_BASE_COMMANDS = frozenset(
     {
         # version control
         "git", "gh",
-        # file/search tools
-        "ls", "cat", "read", "grep", "find", "tree", "diff", "smart", "rg",
+        # file/search tools (real host binaries the agent shells out to)
+        "ls", "cat", "grep", "rg", "find", "tree", "diff",
         # test runners
         "pytest", "jest", "vitest", "playwright", "rspec", "rake", "go",
         # build / lint
@@ -102,8 +120,8 @@ _RTK_BASE_COMMANDS = frozenset(
         "pnpm", "pip", "bundle", "prisma",
         # cloud / containers
         "docker", "kubectl", "aws", "oc",
-        # utilities
-        "json", "deps", "env", "log", "curl", "wget", "summary",
+        # network utilities
+        "curl", "wget",
     }
 )
 

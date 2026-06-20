@@ -126,12 +126,16 @@ tools **bypass** it (rtk only touches the shell boundary).
 
 In the bench, `RtkArm` is a **hook arm** (`bench.arm.Arm`, `kind = BASELINE` so the model goes
 **straight to the gateway like A0**). It overrides `pre_tool_hook(tool_name, tool_input)`: when
-`tool_name == "Bash"` and the command's first token is one rtk wraps (git, gh, ls, cat, grep,
+`tool_name == "Bash"` and the command's first token is one rtk wraps (git, gh, ls, cat, grep, rg,
 find, tree, diff, pytest, jest, vitest, cargo, go, tsc, ruff, eslint, pnpm, pip, docker, kubectl,
 aws, curl, wget, …), it returns `{"tool_input": {...command: "rtk <cmd>"...}}`; otherwise `None`
-(leave the call untouched — faithful to rtk's no-op on unsupported commands). The runner's
-PreToolUse capability turns that into the SDK's `updatedInput` (see
-`bench/cc_runner.py::_build_harness_hooks` + `tests/test_harness_hooks.py::RewriteArm`).
+(leave the call untouched — faithful to rtk's no-op on unsupported commands). The recognized set
+is **real host executables** the agent shells out to; it deliberately excludes the bash builtin
+`read` (the agent uses the native `Read` tool) and rtk's own subcommand verbs (`smart`/`json`/
+`deps`/`env`/`log`/`summary` — `rtk smart`, not a standalone `smart` binary) so a bare `env`/`log`
+line is never mis-wrapped. The runner's PreToolUse capability turns the returned `tool_input` into
+the SDK's `updatedInput` (see `bench/cc_runner.py::_build_harness_hooks` +
+`tests/test_harness_hooks.py::RewriteArm`).
 
 - **The product is the binary — install it on the runner box (any one):**
   ```sh
@@ -141,10 +145,22 @@ PreToolUse capability turns that into the SDK's `updatedInput` (see
   # or
   cargo install --git https://github.com/rtk-ai/rtk
   ```
-- **Env:** none required. Optional `RTK_BIN` pins the binary path/name (default `rtk` on `PATH`).
-- **`ready()`** runs `rtk --version` (`shutil.which('rtk')` + a version probe) and **SKIPs** with a
-  precise reason if the binary is absent or broken — mirroring how `woz.ready()` gates on node +
-  plugin presence + a valid login session. There is **no** proxy and **no** `RTK_BASE_URL` to provision.
+- **Provisioning gotcha — the binary must be on the RUNNER PROCESS's PATH, not just a login shell.**
+  The panel launch is a **non-interactive** `gcloud compute ssh cc-bench --command '<…>'`, which does
+  NOT source `.bashrc`/`.profile`, so a binary under `~/.local/bin` is **invisible** to the worker
+  (`which rtk` ⇒ none ⇒ `ready()` SKIPs the arm and it runs nothing). Provision it onto a **system**
+  PATH dir that the non-interactive shell already has (`/usr/local/bin`), e.g. `selfhost/cc_setup.sh`
+  symlinks `~/.local/bin/rtk` → `/usr/local/bin/rtk`. As a belt-and-suspenders, the box `.env` also
+  pins `RTK_BIN=/home/nicks/.local/bin/rtk` (loaded via dotenv in `main()`), so both `ready()` and the
+  rewrite resolve the absolute path even without the symlink. Confirm under the **exact** launch form:
+  `gcloud … --command '<bench>/.venv/bin/python -c "from arms.rtk import RtkArm; print(RtkArm().ready())"'`
+  must print `(True, …)` before scheduling.
+- **Env:** none strictly required. Optional `RTK_BIN` pins the binary's absolute path (recommended on
+  the runner so a non-login process resolves it; default `rtk` on `PATH`).
+- **`ready()`** runs `rtk --version` (`shutil.which('rtk')` + an absolute-path fallback + a version
+  probe) and **SKIPs** with a precise reason if the binary is absent or broken — mirroring how
+  `woz.ready()` gates on node + plugin presence + a valid login session. There is **no** proxy and
+  **no** `RTK_BASE_URL` to provision.
 - **Run:** install the binary, then `make bench ARM=rtk`. The KPI path is unchanged: because the
   rewritten (smaller) Bash output is what accrues in context, the usage gateway bills the **real
   post-compression** tokens. The chain log shows the gateway-direct form
