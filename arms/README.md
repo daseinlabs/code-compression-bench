@@ -147,16 +147,30 @@ runs the command and emits *compressed* output into context. The native `Read`/`
 tools **bypass** it (rtk only touches the shell boundary).
 
 In the bench, `RtkArm` is a **hook arm** (`bench.arm.Arm`, `kind = BASELINE` so the model goes
-**straight to the gateway like A0**). It overrides `pre_tool_hook(tool_name, tool_input)`: when
-`tool_name == "Bash"` and the command's first token is one rtk wraps (git, gh, ls, cat, grep, rg,
-find, tree, diff, pytest, jest, vitest, cargo, go, tsc, ruff, eslint, pnpm, pip, docker, kubectl,
-aws, curl, wget, …), it returns `{"tool_input": {...command: "rtk <cmd>"...}}`; otherwise `None`
-(leave the call untouched — faithful to rtk's no-op on unsupported commands). The recognized set
-is **real host executables** the agent shells out to; it deliberately excludes the bash builtin
-`read` (the agent uses the native `Read` tool) and rtk's own subcommand verbs (`smart`/`json`/
-`deps`/`env`/`log`/`summary` — `rtk smart`, not a standalone `smart` binary) so a bare `env`/`log`
-line is never mis-wrapped. The runner's PreToolUse capability turns the returned `tool_input` into
-the SDK's `updatedInput` (see `bench/cc_runner.py::_build_harness_hooks` +
+**straight to the gateway like A0**). It overrides `pre_tool_hook(tool_name, tool_input)`: for a
+`tool_name == "Bash"` call it **delegates the rewrite decision to the product's OWN rewriter** —
+it shells out to `rtk rewrite -- <cmd>` (since v0.24.0 the binary's *"single source of truth for
+hooks"*, the exact subcommand rtk's installed `~/.claude/hooks/rtk-rewrite.sh` calls) and uses its
+**stdout verbatim** as the new command (`{"tool_input": {...command: <rtk's rewrite>...}}`).
+`rtk rewrite` prints the rewritten command if rtk has an equivalent and **prints nothing** if it
+doesn't, so the arm gates on **stdout, not the exit code** (rtk sets a non-zero code for the
+rewritten case by design, matching the product hook `REWRITTEN=$(rtk rewrite "$CMD") || exit 0`):
+non-empty/different stdout ⇒ rewrite, empty/unchanged stdout ⇒ `None` (leave the call untouched).
+
+This means the bench wraps rtk's **full 100+ command set** and inherits rtk's own
+command-detection — including remaps the agent never sees as a bare prefix (`cat file.txt` →
+`rtk read file.txt`) and **pipe / `&&`-chain / env-prefix** handling (`git status | head` →
+`rtk git status | head`; `cargo test && git push` → `rtk cargo test && rtk git push`;
+`FOO=bar git status` → `FOO=bar rtk git status`). It is **not** a Python re-implementation of
+rtk's trigger logic: an earlier version hand-curated a ~30-command set + a `_first_token` parser
+and prepended a bare `rtk `, which **under-wrapped** (it missed `cat`→`read`, keyed multiword forms
+on the first token only, and no-opped entirely on any pipe/chain/subshell/env-prefix) — so the
+agent's transcript saw *less* rtk compression than the real `rtk init -g` hook produces,
+mis-measuring rtk's token win. Delegating to `rtk rewrite` eliminates that approximation. The
+bash builtin `read` (the agent uses the native `Read` tool) and rtk's own subcommand verbs are
+excluded **because the product's own `rtk rewrite` returns nothing for them**, not by a Python
+opt-out — faithful by construction. The runner's PreToolUse capability turns the returned
+`tool_input` into the SDK's `updatedInput` (see `bench/cc_runner.py::_build_harness_hooks` +
 `tests/test_harness_hooks.py::RewriteArm`).
 
 - **The product is the binary — install it on the runner box (any one):**
@@ -180,9 +194,12 @@ the SDK's `updatedInput` (see `bench/cc_runner.py::_build_harness_hooks` +
 - **Env:** none strictly required. Optional `RTK_BIN` pins the binary's absolute path (recommended on
   the runner so a non-login process resolves it; default `rtk` on `PATH`).
 - **`ready()`** runs `rtk --version` (`shutil.which('rtk')` + an absolute-path fallback + a version
-  probe) and **SKIPs** with a precise reason if the binary is absent or broken — mirroring how
-  `woz.ready()` gates on node + plugin presence + a valid login session. There is **no** proxy and
-  **no** `RTK_BASE_URL` to provision.
+  probe) **and then smokes the real integration path** — `rtk rewrite -- 'git status'` must emit an
+  `rtk …`-wrapped command. The second check catches a **legacy < 0.24.0** binary whose `--version`
+  passes but which lacks the `rewrite` subcommand the hook relies on (it would silently never
+  compress); `ready()` **SKIPs** with a precise reason naming the **≥ 0.24.0** requirement if so.
+  This mirrors how `woz.ready()` gates on the real login session, not just node presence. There is
+  **no** proxy and **no** `RTK_BASE_URL` to provision.
 - **Run:** install the binary, then `make bench ARM=rtk`. The KPI path is unchanged: because the
   rewritten (smaller) Bash output is what accrues in context, the usage gateway bills the **real
   post-compression** tokens. The chain log shows the gateway-direct form

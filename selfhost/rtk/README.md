@@ -1,10 +1,13 @@
 # rtk — provisioning the real rtk-ai/rtk binary for the `rtk` arm
 
 `rtk` is a **hook arm**, not a proxy (see `arms/README.md` → *rtk*). There is no
-server to run: the product is the `rtk` CLI binary, and the arm rewrites
-`Bash <cmd>` → `rtk <cmd>` via a Claude Code PreToolUse hook so the binary
-compresses shell stdout before it enters context. The only "provisioning" is
-making the **real binary** resolvable by the runner.
+server to run: the product is the `rtk` CLI binary, and for a Bash call the arm
+delegates the rewrite to the product's own `rtk rewrite -- <cmd>` (the subcommand
+rtk's `~/.claude/hooks/rtk-rewrite.sh` calls) so the binary compresses shell
+stdout before it enters context. Install **rtk ≥ 0.24.0** (the version that ships
+`rtk rewrite`); the only "provisioning" is making the **real binary** resolvable
+by the runner. `ready()` smokes `rtk rewrite -- 'git status'`, so a legacy binary
+is caught and the arm SKIPs.
 
 ## The trap this directory fixes
 
