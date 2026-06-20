@@ -44,7 +44,7 @@ deep call stacks — i.e. the regime that separates a real compression layer fro
 | **Woz** | Claude Code plugin: AST-aware tools + delegated exploration | MCP tool layer |
 | **Edgee** | Open-source gateway: deterministic tool-output compression | Hosted gateway / self-host |
 | **RTK** | Single-binary proxy: command-output compression | Self-host proxy |
-| **Headroom** | Open-source, reversible context compression (6-signal scorer) | Self-host (OpenAI-compatible) |
+| **Headroom** | Open-source, reversible context compression (6-signal scorer) | Self-host (Anthropic-native proxy) |
 | **Compresr** | "Context Gateway" proxy: history + tool-output compaction | Self-host / hosted proxy |
 | **Baseline (A0)** | The identical bare agent, no compression | — |
 
