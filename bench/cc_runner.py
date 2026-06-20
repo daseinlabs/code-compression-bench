@@ -74,6 +74,7 @@ import json
 import multiprocessing as mp
 import os
 import shutil
+import signal
 import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -568,10 +569,28 @@ async def _run_sdk(
 
     messages: list[dict] = []
     result_msg = None
-    async for msg in query(prompt=prompt, options=options):
-        messages.append(_message_to_jsonable(msg))
-        if type(msg).__name__ == "ResultMessage":
-            result_msg = msg
+    # Hold the async generator EXPLICITLY so we can always finalize it. When
+    # query() raises mid-stream (e.g. the CLI returns an error ResultMessage, or
+    # an upstream hiccup breaks the SSE stream), a bare `async for` leaves the
+    # generator suspended and its `claude` subprocess ORPHANED — it keeps running
+    # (and billing) detached from this worker, holding a connection to the shared
+    # service and contending with the retry attempt. That is the real cause of the
+    # cascading "Claude Code returned an error result" infra failures, NOT a
+    # gateway->Vertex transient. aclose() terminates the subprocess on EVERY exit
+    # path: success, cap, or infra fault.
+    agen = query(prompt=prompt, options=options)
+    try:
+        async for msg in agen:
+            messages.append(_message_to_jsonable(msg))
+            if type(msg).__name__ == "ResultMessage":
+                result_msg = msg
+    finally:
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001 — best-effort reap; never mask the real error
+                pass
 
     return _collect_result(result_msg, messages)
 
@@ -673,6 +692,52 @@ def _capture_patch(repo_dir: str) -> str:
         return out.stdout or ""
     except Exception:
         return ""
+
+
+# ── orphan reaper: backstop for a leaked `claude` CLI subprocess ──────────────
+def _reap_orphan_claude() -> int:
+    """SIGKILL any `claude` CLI still descending from THIS worker, on teardown.
+
+    The SDK reaps its subprocess on aclose(), but two paths can leak it alive:
+    the wall-cap (we cancel asyncio.run without draining the generator) and a
+    wedged transport. A leaked `claude` keeps streaming against the shared
+    service and billing, detached from us. We reap by walking /proc for procs
+    whose comm is exactly ``claude`` whose ancestry leads back to ``os.getpid()``,
+    and kill by EXPLICIT PID — never a ``-f`` pattern match, so this can never
+    SIGTERM the worker itself. Best-effort, Linux-only, never raises. Returns the
+    count reaped (0 on non-Linux / nothing to do).
+    """
+    me = os.getpid()
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return 0  # no procfs (local dev / non-Linux) — the box is Linux
+    ppid_of: dict[int, int] = {}
+    comm_of: dict[int, str] = {}
+    for pid in pids:
+        try:
+            stat = open(f"/proc/{pid}/stat").read()
+            rp = stat.rindex(")")               # comm is in parens, may hold spaces
+            comm_of[pid] = stat[stat.index("(") + 1:rp]
+            ppid_of[pid] = int(stat[rp + 2:].split()[1])
+        except Exception:
+            continue
+    killed = 0
+    for pid, comm in comm_of.items():
+        if comm != "claude":
+            continue
+        cur, hops = ppid_of.get(pid, 0), 0      # walk ancestry up to me (bounded)
+        while cur and hops < 64:
+            if cur == me:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    killed += 1
+                except Exception:
+                    pass
+                break
+            cur = ppid_of.get(cur, 0)
+            hops += 1
+    return killed
 
 
 # ── gateway resolution: SHARED standalone vs per-(instance,arm) ephemeral ─────
@@ -817,6 +882,13 @@ def run_agent(
             arm.teardown()
         except Exception:
             pass
+        # backstop: SIGKILL any `claude` child that survived aclose (wall-cap /
+        # wedged transport). Runs AFTER the SDK call returns or raises, so the
+        # agent's on-disk edits are already captured below — safe to hard-kill.
+        n = _reap_orphan_claude()
+        if n:
+            print(f"  reaped {n} orphan claude proc(s) for {instance_id} "
+                  f"[{arm.name}]", flush=True)
 
     wall_s = round(time.time() - t0, 1)
     patch = _capture_patch(repo_dir)
