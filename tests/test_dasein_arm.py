@@ -221,6 +221,44 @@ def test_stop_decision_abstains_without_cwd(tmp_path):
     assert arm.stop_decision({"session_id": "s"}) is None    # no cwd -> abstain
 
 
+# ── robust JSON extraction (tolerate a library banner on stdout) ──────────────
+def test_parse_hook_json_tolerates_banner_prefix():
+    """The real product prints a banner on stdout (mini-swe-agent's "👋 ..."); _parse_hook_json
+    must still extract the trailing JSON object so the scout brief isn't silently dropped."""
+    from arms.dasein import _parse_hook_json
+    stdout = ('\U0001f44b This is mini-swe-agent version 2.3.0.\n'
+              "Loading global config from '/home/nicks/.config/mini-swe-agent/.env'\n"
+              '{"brief": "SCOUT: edit src/foo.py", "source": "scout"}')
+    out = _parse_hook_json(stdout)
+    assert out is not None and out["brief"] == "SCOUT: edit src/foo.py"
+    assert out["source"] == "scout"
+
+
+def test_parse_hook_json_plain_and_empty():
+    from arms.dasein import _parse_hook_json
+    assert _parse_hook_json('{"verdict": "FINALIZE"}')["verdict"] == "FINALIZE"
+    assert _parse_hook_json("") is None
+    assert _parse_hook_json("no json here") is None
+    # nested braces inside the object don't trip the balanced scan
+    assert _parse_hook_json('banner\n{"a": {"b": 1}, "c": "}"}')["a"]["b"] == 1
+
+
+def test_step0_injection_survives_banner_prefix(tmp_path):
+    """End-to-end: a runner that prints a banner before its JSON still yields the brief."""
+    script = tmp_path / "banner_runner.py"
+    script.write_text(
+        "import sys, json\n"
+        "print('\U0001f44b This is mini-swe-agent version 2.3.0.')\n"  # banner to stdout
+        "cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+        "json.loads(sys.stdin.read() or '{}')\n"
+        "sys.stdout.write(json.dumps({'brief': 'SCOUT brief via banner runner', 'source': 'scout'}))\n",
+        encoding="utf-8")
+    os.environ["DASEIN_HOOK_CMD"] = f"{sys.executable} {script}"
+    arm = _arm()
+    brief = arm.step0_injection({"problem_statement": "x"}, str(tmp_path / "repo"))
+    assert brief == "SCOUT brief via banner runner"
+
+
 # ── clean-room invariant ──────────────────────────────────────────────────────
 def test_arm_module_does_not_import_adaptive_context():
     """The arm may NAME adaptive_context in prose (it explains the clean-room rule) but must never

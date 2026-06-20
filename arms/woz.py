@@ -288,6 +288,23 @@ class WozLoginError(RuntimeError):
     """The one-time Woz CLI login failed (bad key, node error, missing CLI)."""
 
 
+class WozStaleSessionError(WozLoginError):
+    """The login failed specifically because the supplied ``WOZ_API_KEY`` is a
+    STALE/server-revoked website ``{refreshToken, organizationId}`` token.
+
+    This is NOT a transient/infra failure and ``setup()`` CANNOT self-heal it: a
+    website token that has been revoked or expired will never authenticate
+    headlessly, and re-running ``login --token`` with the same stale key just
+    reprints ``WozCode session is stale. Please log in again using /woz-login.``
+    The ONLY fix is a human minting a FRESH session via the browser ``/woz-login``
+    flow (then ``login --token <fresh>`` on the runner, or copying
+    ``~/.claude/wozcode/`` over). We raise this distinct subclass so the operator
+    sees the actionable cause immediately instead of a generic login error; it
+    still IS-A ``WozLoginError`` so existing catch sites (RunInfraError mapping)
+    keep working unchanged — the arm fails CLOSED either way.
+    """
+
+
 @register("woz")
 class WozArm(ToolArm):
     """Load Woz's REAL Claude Code plugin as the agent's tool layer.
@@ -396,7 +413,12 @@ class WozArm(ToolArm):
 
         On failure we raise WozLoginError with a clear message (and log it) rather
         than crashing the whole run silently — the runner catches arm-setup errors
-        and surfaces them as an infra failure for THIS arm only.
+        and surfaces them as an infra failure for THIS arm only. When the failure is
+        specifically a STALE/revoked website token (the common case — WOZ_API_KEY is
+        a short-lived ``{refreshToken,organizationId}`` minted by /woz-login), we
+        raise the more specific WozStaleSessionError (a WozLoginError subclass) so
+        the operator sees the actionable cause: setup() CANNOT self-heal a stale
+        token — a human must re-mint a fresh session via the browser /woz-login.
         """
         api_key = os.environ.get("WOZ_API_KEY")
         if not api_key:
@@ -439,6 +461,23 @@ class WozArm(ToolArm):
             # NEVER echo the key. Surface stdout/stderr tails (CLI prints the
             # authenticated identity on success / the reason on failure).
             tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-400:]
+            # Distinguish the COMMON, UN-self-healable cause — a stale/revoked
+            # website {refreshToken,organizationId} token — from a generic login
+            # failure. The live CLI prints "WozCode session is stale. Please log in
+            # again using /woz-login." (and writes nothing) in exactly this case.
+            # Raising WozStaleSessionError gives the operator the actionable cause
+            # immediately; it still IS-A WozLoginError so the runner's
+            # arm-setup-error -> RunInfraError mapping (fail-closed) is unchanged.
+            low = tail.lower()
+            if any(m in low for m in _SESSION_FAIL_MARKERS):
+                raise WozStaleSessionError(
+                    "Woz login could NOT establish a session: WOZ_API_KEY is a STALE "
+                    "or server-revoked website {refreshToken,organizationId} token "
+                    "and setup() cannot self-heal it. Mint a FRESH session via the "
+                    "browser /woz-login flow, then re-run `wozcode-cli.js login "
+                    "--token <fresh>` on the runner (or copy ~/.claude/wozcode/), and "
+                    f"update WOZ_API_KEY. CLI output tail: {tail!r}"
+                )
             raise WozLoginError(
                 f"Woz login failed (exit {proc.returncode}). Check WOZ_API_KEY is a "
                 f"valid Woz account key. CLI output tail: {tail!r}"

@@ -73,6 +73,55 @@ _CONTINUE_STEER = (
     "Keep going — make the concrete code change that fixes the failing test, then stop.")
 
 
+def _parse_hook_json(stdout: str) -> dict | None:
+    """Extract the runner's JSON object from `stdout`, tolerating a stray banner prefix.
+
+    The runner CLI emits JSON-only on stdout, but the real product can import libraries that print a
+    banner BEFORE our redirect takes hold (e.g. mini-swe-agent's "👋 This is mini-swe-agent ..."
+    line). So we don't assume the whole stream is JSON: try a straight parse first, else scan for the
+    LAST top-level `{...}` object (the JSON we wrote last). Returns the dict, or None if no parseable
+    JSON object is present."""
+    s = (stdout or "").strip()
+    if not s:
+        return None
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    # Scan each top-level '{' in FORWARD order and return the FIRST that yields a balanced, parseable
+    # object (the JSON we wrote is the last LINE but is itself a single top-level object — starting at
+    # its OPENING brace, not an inner one, is what makes the whole object parse). String-aware so a
+    # '}' inside a value (e.g. "c": "}") doesn't close the object early.
+    for start in (i for i, ch in enumerate(s) if ch == "{"):
+        depth, in_str, esc = 0, False, False
+        for j in range(start, len(s)):
+            ch = s[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(s[start:j + 1])
+                        if isinstance(obj, dict):
+                            return obj
+                    except Exception:
+                        pass  # this start's object isn't valid JSON; try the next top-level '{'
+                    break  # consumed a balanced object from this start; move to the next start
+    return None
+
+
 @register("dasein")
 class DaseinArm(ProxyArm):
     name = "dasein"
@@ -224,7 +273,13 @@ class DaseinArm(ProxyArm):
 
     def _run_hook(self, command: str, payload: dict) -> dict | None:
         """Invoke `<DASEIN_HOOK_CMD> <command>` with JSON on stdin; parse JSON stdout. Fail-open
-        (None) on any error so a misconfigured runner never crashes the solve."""
+        (None) on any error so a misconfigured runner never crashes the solve.
+
+        The runner CLI guarantees stdout is JSON-only (it redirects library banners to stderr), but
+        we parse DEFENSIVELY: the real product imports libraries that may print a banner to stdout
+        (e.g. mini-swe-agent's "👋 ..." line), so we extract the LAST balanced JSON object from
+        stdout rather than assuming the whole stream is JSON. A stray prefix line therefore never
+        fails the parse and silently drops the scout brief / adjudicator verdict."""
         argv = self._hook_cmd()
         if not argv:
             return None
@@ -234,6 +289,6 @@ class DaseinArm(ProxyArm):
                 text=True, timeout=float(os.environ.get("DASEIN_HOOK_TIMEOUT_S", "300")))
             if proc.returncode != 0 or not proc.stdout:
                 return None
-            return json.loads(proc.stdout)
+            return _parse_hook_json(proc.stdout)
         except Exception:
             return None

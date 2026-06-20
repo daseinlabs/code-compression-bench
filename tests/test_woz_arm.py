@@ -40,7 +40,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from bench.arm import ArmKind, ToolArm, get_arm  # noqa: E402
-from arms.woz import WozArm, _session_authenticated  # noqa: E402
+from arms.woz import (  # noqa: E402
+    WozArm,
+    WozLoginError,
+    WozStaleSessionError,
+    _session_authenticated,
+)
 
 
 @contextmanager
@@ -79,21 +84,29 @@ def _make_plugin_tree(root: Path) -> Path:
 
 @contextmanager
 def _fake_node(status_stdout: str = "Logged in as nick@example.com",
-               status_rc: int = 0, version: str = "v22.23.0"):
+               status_rc: int = 0, version: str = "v22.23.0",
+               login_stdout: str = "Authenticated as nick@example.com",
+               login_rc: int = 0):
     """Put a fake ``node`` on disk that:
       - prints ``version`` for ``--version`` (exit 0),
       - prints ``status_stdout`` and exits ``status_rc`` for the ``status`` subcmd,
-      - exits 0 otherwise (e.g. a login call).
-    Yields the fake node path (to set WOZ_NODE). Works on POSIX + Windows.
+      - prints ``login_stdout`` and exits ``login_rc`` for the ``login`` subcmd,
+      - exits 0 otherwise.
+    The ``login`` branch lets us exercise ``setup()`` against deterministic CLI
+    behaviour (success / stale-token / generic failure). Yields the fake node path
+    (to set WOZ_NODE). Works on POSIX + Windows.
     """
     d = Path(tempfile.mkdtemp(prefix="woz_node_"))
     if os.name == "nt":
         node = d / "node.cmd"
         # %* is the full arg string; crude but sufficient (we only branch on tokens).
+        # NB: check ``login`` BEFORE ``status`` is irrelevant (disjoint tokens), but
+        # the login branch must come before the catch-all exit.
         node.write_text(
             "@echo off\r\n"
             f'echo %* | findstr /C:"--version" >nul && (echo {version} & exit /b 0)\r\n'
             f'echo %* | findstr /C:"status" >nul && (echo {status_stdout} & exit /b {status_rc})\r\n'
+            f'echo %* | findstr /C:"login" >nul && (echo {login_stdout} & exit /b {login_rc})\r\n'
             "exit /b 0\r\n",
             encoding="utf-8",
         )
@@ -105,6 +118,7 @@ def _fake_node(status_stdout: str = "Logged in as nick@example.com",
             f'  case "$a" in\n'
             f'    --version) echo "{version}"; exit 0;;\n'
             f'    status) echo "{status_stdout}"; exit {status_rc};;\n'
+            f'    login) echo "{login_stdout}"; exit {login_rc};;\n'
             "  esac\n"
             "done\n"
             "exit 0\n",
@@ -206,6 +220,65 @@ def test_skip_session_check_bypasses_probe():
         ok, detail = _session_authenticated()
     assert ok is True
     assert "bypass" in detail.lower()
+
+
+# ── setup(): the audit MINOR fix — a stale token gives a DISTINCT, actionable
+#    error (WozStaleSessionError), not a generic WozLoginError; both fail closed ─
+def test_setup_succeeds_on_login_ok():
+    """A clean login (exit 0) returns normally — no exception, creds 'stored'."""
+    with tempfile.TemporaryDirectory() as td:
+        root = _make_plugin_tree(Path(td))
+        with _fake_node(login_stdout="Authenticated as nick@example.com",
+                        login_rc=0) as node:
+            with _env(WOZ_API_KEY="k", WOZ_PLUGIN_DIR=str(root), WOZ_NODE=node):
+                WozArm().setup()  # must not raise
+
+
+def test_setup_raises_stale_session_error_on_stale_token():
+    """The live failure shape: `login --token <stale website token>` exits non-zero
+    and prints 'WozCode session is stale. Please log in again using /woz-login.'
+    setup() must raise the DISTINCT WozStaleSessionError (operator sees the
+    un-self-healable cause), which still IS-A WozLoginError (fail-closed mapping)."""
+    with tempfile.TemporaryDirectory() as td:
+        root = _make_plugin_tree(Path(td))
+        with _fake_node(
+            login_stdout="Error: WozCode session is stale. Please log in again using /woz-login.",
+            login_rc=1,
+        ) as node:
+            with _env(WOZ_API_KEY="stale_website_token",
+                      WOZ_PLUGIN_DIR=str(root), WOZ_NODE=node):
+                raised = None
+                try:
+                    WozArm().setup()
+                except WozLoginError as e:  # base class — proves it's still caught here
+                    raised = e
+    assert isinstance(raised, WozStaleSessionError), raised
+    assert isinstance(raised, WozLoginError)  # fail-closed: runner mapping unchanged
+    msg = str(raised).lower()
+    assert "stale" in msg and "/woz-login" in msg
+    assert "self-heal" in msg  # tells the operator setup() can't recover it
+
+
+def test_setup_raises_generic_login_error_on_other_failure():
+    """A non-stale login failure (e.g. a real network/key error with NO stale
+    marker) stays a generic WozLoginError, NOT misclassified as stale."""
+    with tempfile.TemporaryDirectory() as td:
+        root = _make_plugin_tree(Path(td))
+        with _fake_node(login_stdout="Error: network unreachable (ECONNREFUSED)",
+                        login_rc=1) as node:
+            with _env(WOZ_API_KEY="k", WOZ_PLUGIN_DIR=str(root), WOZ_NODE=node):
+                raised = None
+                try:
+                    WozArm().setup()
+                except WozLoginError as e:
+                    raised = e
+    assert isinstance(raised, WozLoginError)
+    assert not isinstance(raised, WozStaleSessionError)
+
+
+def test_stale_session_error_is_a_login_error_subclass():
+    """Lock the type relationship the runner's catch site relies on."""
+    assert issubclass(WozStaleSessionError, WozLoginError)
 
 
 # ── pre-session gates still fire (don't regress the plugin-tree / node checks) ─

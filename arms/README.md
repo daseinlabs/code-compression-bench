@@ -79,6 +79,28 @@ website `{refreshToken, organizationId}` token that has gone stale will **not** 
 CLI prints `WozCode session is stale`) and no session file is written — re-run the browser
 `/woz-login` to mint a fresh one, then login (or copy `~/.claude/wozcode/`) onto the runner.
 
+> **⚠️ `WOZ_API_KEY` is a SHORT-LIVED website token, not a durable license key.** It is a
+> `{refreshToken, organizationId}` blob minted by the browser `/woz-login` flow, and it
+> **expires / gets server-revoked** — so it must be **periodically re-minted** by a human.
+> `setup()`/`ready()` **detect a stale-or-absent session and SKIP the arm cleanly** (so a
+> sessionless woz never gets scheduled and dies as an `auth.login_required` infra failure for
+> every task), but they **cannot self-heal it**: re-running `login --token <stale>` with the same
+> revoked token just reprints `WozCode session is stale` and writes nothing. When that happens,
+> `setup()` raises **`WozStaleSessionError`** (a `WozLoginError` subclass — the arm still fails
+> closed, the runner's arm-setup-error → infra-error mapping is unchanged) whose message names the
+> actionable cause so the operator sees it immediately. **To recover:** (a) complete `/woz-login`
+> in a browser to mint a fresh `{refreshToken, organizationId}`; (b) run
+> `wozcode-cli.js login --token <fresh>` on the runner (or copy a logged-in `~/.claude/wozcode/`
+> onto it); (c) update `WOZ_API_KEY` in `.env`/`api_key_dump.txt`. **Headless tip:** the
+> browser-login CLI starts a *loopback-only* callback server on the runner (e.g.
+> `http://localhost:<port>`); a raw IAP **TCP** tunnel to that port is **blocked** by the IAP
+> firewall (only SSH/22 is open → `4003 failed to connect to backend`), so bridge it with an **SSH
+> local port-forward over the existing port-22 IAP tunnel** instead:
+> `gcloud compute ssh <runner> --tunnel-through-iap --ssh-flag="-L <port>:localhost:<port>" --ssh-flag="-N"`,
+> then open the printed `app.wozcode.com/wozcode/auth?callback_port=<port>&...` URL in a browser
+> where you're signed into WOZCODE — the post-login redirect to `localhost:<port>` rides the
+> forward back to the runner's callback server and writes `~/.claude/wozcode/auth.json`.
+
 - **What it is:** paid Claude Code plugin loaded via SDK `plugins=[...]` (real `code`/`explore`
   subagents + `code` MCP server). Not self-host/free, not a bare MCP server, not a stub.
 - **Env** (mirrors `.env.example`):
