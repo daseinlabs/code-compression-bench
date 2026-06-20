@@ -43,7 +43,7 @@ deep call stacks — i.e. the regime that separates a real compression layer fro
 | **Dasein** | Curates the agent's context at serve time with a learned model, wrapped in a full run-governance stack | Hosted, keyed service |
 | **Woz** | Claude Code plugin: AST-aware tools + delegated exploration | MCP tool layer |
 | **Edgee** | Open-source gateway: deterministic tool-output compression | Hosted gateway / self-host |
-| **RTK** | Single-binary proxy: command-output compression | Self-host proxy |
+| **RTK** | Single Rust binary: shell-command-output compression via a Claude Code PreToolUse hook (`git status` → `rtk git status`) | Install binary; runs as a hook (model gateway-direct, like A0) |
 | **Headroom** | Open-source, reversible context compression (6-signal scorer) | Self-host (Anthropic-native proxy) |
 | **Compresr** | "Context Gateway" proxy: history + tool-output compaction | Self-host / hosted proxy |
 | **Baseline (A0)** | The identical bare agent, no compression | — |
@@ -64,6 +64,8 @@ A0 (baseline)   Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway �
 proxy arms      Claude Code ──(ANTHROPIC_BASE_URL=vendor proxy)──> vendor proxy (compresses)
                             ──(vendor's UPSTREAM = gateway)──> gateway ──> Vertex
 woz             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway ──> Vertex   (+ Woz MCP tools)
+rtk             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway ──> Vertex   (model direct like A0;
+                            PreToolUse hook rewrites Bash <cmd> -> rtk <cmd>, compressing shell stdout)
 ```
 
 - **Vertex auth = ADC** on the runner box: `gcloud auth application-default login`. No API key is used
@@ -72,9 +74,11 @@ woz             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway �
 - We do **not** set `CLAUDE_CODE_USE_VERTEX` — Claude Code speaks the Anthropic API to the proxy/gateway
   above it; only the gateway bridges to Vertex. Claude Code is handed a dummy **bridge token**
   (`ANTHROPIC_AUTH_TOKEN`); the real Vertex credential lives on the gateway.
-- **Per-vendor upstream config (provisioning requirement):** each vendor proxy must be configured to
+- **Per-vendor upstream config (provisioning requirement):** each PROXY arm must be configured to
   forward to the gateway URL (the runner prints it per run). See `arms/README.md` for exactly where that
-  upstream is set for edgee / rtk / headroom / compresr / dasein.
+  upstream is set for edgee / headroom / compresr / dasein. (**rtk is NOT a proxy** — it's the rtk-ai/rtk
+  binary run as a PreToolUse hook; install the binary on the runner, the model goes straight to the
+  gateway like A0, and there is no upstream to set.)
 
 ## Leaderboard
 
@@ -95,8 +99,10 @@ gcloud auth application-default login    # ADC on the box — no model API key n
 # 3. Configure — copy the template and fill per-arm keys + (optional) Vertex overrides
 cp .env.example .env        # MODEL + per-arm endpoints; VERTEX_PROJECT/LOCATION default to dasein-473321/us-east5
 
-# 4. (self-host arms) launch the local proxies — each forwards to the gateway URL
-make selfhost-up            # edgee / rtk / headroom / compresr proxies (set their upstream = gateway)
+# 4. (self-host proxy arms) launch the local proxies — each forwards to the gateway URL
+make selfhost-up            # edgee / headroom / compresr proxies (set their upstream = gateway)
+#    rtk is NOT a proxy: install the rtk-ai/rtk binary on the runner instead
+#    (brew install rtk  |  curl -fsSL .../install.sh | sh  |  cargo install --git ...)
 
 # 5. Smoke one task per arm, then the full set
 make smoke                  # 1 task per ready arm, end-to-end + grade

@@ -4,34 +4,25 @@
 # server-side and forwards to the underlying model (MODEL via OPENAI_BASE_URL /
 # OPENAI_API_KEY, or the Anthropic-native upstream for headroom). The bench
 # ProxyArm for each points at the matching *_BASE_URL from .env (defaults below):
-#   edgee    -> EDGEE_BASE_URL    (default http://127.0.0.1:8801)
 #   headroom -> HEADROOM_BASE_URL (default http://127.0.0.1:8787 — Headroom's
 #               real default proxy port; Anthropic-native, listens on 8787)
 #
-# NOT a proxy (no service here): rtk is the rtk-ai/rtk CLI binary run as a Claude
-# Code PreToolUse hook (Bash <cmd> -> rtk <cmd>); install the binary on the runner,
-# the model goes straight to the gateway. See arms/rtk.py + arms/README.md.
+# NOT a compose service:
+#   * edgee — Edgee (edgee-ai/edgee) is a Rust CLI, not a container. The old
+#     `edgee/edgee:latest` image with `UPSTREAM_BASE_URL=${OPENAI_BASE_URL}` was
+#     fictitious (no such image; and this bench is Anthropic-native, so
+#     OPENAI_BASE_URL isn't set). The `edgee` arm builds a one-line FORK of the real
+#     CLI (selfhost/edgee/build.sh) and runs its REAL `edgee local-gateway` with
+#     EDGEE_ANTHROPIC_UPSTREAM=<gateway_url> (selfhost/edgee/launch.sh, real default
+#     port 8787). See selfhost/edgee/README.md.
+#   * rtk — the rtk-ai/rtk CLI binary run as a Claude Code PreToolUse hook
+#     (Bash <cmd> -> rtk <cmd>), installed on the runner; the model goes straight to
+#     the gateway. See arms/rtk.py + arms/README.md.
 #
-# These are SKELETONS. Replace `image:` (or add a `build:` context) with each
-# project's published image and wire its real config. Run: `make selfhost-up`.
+# The remaining service is a SKELETON. Replace `image:` (or add a `build:` context)
+# with the project's published image and wire its real config. Run: `make selfhost-up`.
 
 services:
-  edgee:
-    # Edgee — open-source Rust gateway. TODO: pin the real image / build context.
-    image: edgee/edgee:latest
-    ports:
-      - "8801:8080"
-    environment:
-      # forward target: the shared model endpoint every arm uses
-      UPSTREAM_BASE_URL: "${OPENAI_BASE_URL}"
-      UPSTREAM_API_KEY: "${OPENAI_API_KEY}"
-      MODEL: "${MODEL}"
-      COMPRESSION_TARGET_RATIO: "${COMPRESSION_TARGET_RATIO:-0.5}"
-    restart: unless-stopped
-
-  # NB: no `rtk` service. rtk (rtk-ai/rtk) is NOT a proxy — it is a CLI binary run
-  # as a Claude Code PreToolUse hook (Bash <cmd> -> rtk <cmd>), installed on the
-  # runner box, not stood up here. See arms/rtk.py.
 
   headroom:
     # Headroom — open-source, Anthropic-native reversible compression

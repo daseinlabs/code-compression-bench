@@ -141,7 +141,7 @@ must be told to forward to the gateway URL the runner prints per run
 
 | arm | where the vendor's upstream is configured |
 |---|---|
-| **edgee** | `UPSTREAM_BASE_URL` in `selfhost/docker-compose.yml` (point at the gateway URL) |
+| **edgee** | `EDGEE_ANTHROPIC_UPSTREAM=<gateway_url>` on the forked `edgee local-gateway` (the patch wires this env var into the Anthropic passthrough's `with_base_url`; see `selfhost/edgee/`). Launch: `GATEWAY_URL=<gateway_url> EDGEE_PORT=8787 bash selfhost/edgee/launch.sh` |
 | **headroom** | `ANTHROPIC_TARGET_API_URL` (or the `--anthropic-api-url` flag) on `headroom proxy --port 8787 --mode token --anthropic-api-url <gateway>` — Anthropic-native upstream, NOT LiteLLM |
 | **compresr** | `ANTHROPIC_PROVIDER_URL=<gateway_url>` set ON THE COMPRESR PROCESS (the Context Gateway's upstream-redirect var; see `internal/gateway/providers.go`) — Claude Code points `COMPRESR_GATEWAY_URL=http://127.0.0.1:18081` at the gateway |
 
@@ -153,14 +153,23 @@ Claude Code speaks the Anthropic API straight to the vendor proxy, so any vendor
 **on the vendor proxy** (configured at provisioning), and Vertex auth is **ADC on the box**
 held by the gateway.
 
-- **Env (defaults):** `EDGEE_BASE_URL=http://127.0.0.1:8801`,
-  `HEADROOM_BASE_URL=http://127.0.0.1:8787` (8787 is Headroom's real default proxy port).
-- **Launch both:** `make selfhost-up` (wraps `docker compose -f selfhost/docker-compose.yml up -d`).
-- **Stop:** `make selfhost-down`.
+- **Env (defaults):** `EDGEE_BASE_URL=http://127.0.0.1:8787` (edgee local-gateway's real
+  default port), `HEADROOM_BASE_URL=http://127.0.0.1:8787` (also Headroom's real default).
+  Both real defaults are 8787 — harmless because vendor arms run **one at a time**; set
+  `EDGEE_PORT`/`EDGEE_BASE_URL` (or `--port`) if you ever co-locate them.
+- **Launch headroom:** `make selfhost-up` (wraps `docker compose -f selfhost/docker-compose.yml up -d`).
+- **Launch edgee:** build the fork once (`bash selfhost/edgee/build.sh`), then per run
+  `GATEWAY_URL=<gateway_url> EDGEE_PORT=8787 bash selfhost/edgee/launch.sh`.
+- **Stop:** `make selfhost-down` (headroom).
 - **Per-project setup notes:**
-  - **edgee** — open-source Rust gateway. Pin the published image (or add a `build:` context)
-    in `selfhost/docker-compose.yml` and configure it as a compression proxy whose
-    `UPSTREAM_BASE_URL` is the gateway URL (NOT Anthropic/Vertex directly).
+  - **edgee** — open-source Rust CLI (`edgee-ai/edgee`), **Anthropic-native**. Its
+    `edgee local-gateway` routes `POST /v1/messages` through the real Anthropic passthrough +
+    Claude `CompressionLayer` (content blocks / `tool_use` / `tool_result` / `cache_control`
+    pass through unchanged). Upstream Anthropic was hardcoded to `api.anthropic.com`; the
+    fork in `selfhost/edgee/` (`anthropic_upstream.patch`, pinned to edgee-cli 0.2.9) wires
+    the already-present `with_base_url` override into `start()` from `EDGEE_ANTHROPIC_UPSTREAM`,
+    so it forwards to the run gateway instead. Build/launch via `selfhost/edgee/build.sh` +
+    `launch.sh` — NOT Docker (the `edgee/edgee:latest` image was fictitious and has been dropped).
   - **headroom** — open-source, **Anthropic-native**, reversible compression
     (github.com/chopratejas/headroom, PyPI `headroom-ai`). Its proxy natively speaks the
     Anthropic Messages API at `/v1/messages`, so Claude Code talks to it directly. Either run

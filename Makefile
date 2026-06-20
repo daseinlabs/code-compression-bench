@@ -45,7 +45,9 @@ bench:
 report:
 	$(PY) -m bench.report --out results/
 
-# Self-hosted proxy arms (edgee / rtk / headroom).
+# Self-hosted PROXY arms (edgee / headroom / compresr). NB: rtk is NOT a proxy —
+# it's the rtk-ai/rtk binary run as a Claude Code PreToolUse hook; install the
+# binary on the runner box, it does not run here.
 selfhost-up:
 	docker compose -f selfhost/docker-compose.yml up -d
 
