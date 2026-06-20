@@ -31,11 +31,28 @@ passing JSON on stdin and reading JSON on stdout. The runner command is `DASEIN_
 errors, the hooks fail OPEN — no brief / a CONTINUE that never pins the loop — so the arm degrades
 to the stock Claude Code scaffold rather than crashing a paid run.
 
+FAITHFULNESS GATE (why ready() requires the hooks, not just the proxy)
+---------------------------------------------------------------------
+v9 A3S has SIX stages across the two seams: (proxy) curator, no-reread, governor; (agent-loop)
+scout, cold-retrieval, the SUBMIT adjudicator's loop control. Three of those six live ONLY in the
+harness-hook seam. If ``DASEIN_HOOK_CMD`` is unset, ``step0_injection`` and ``stop_decision`` both
+fail-open to ``None`` — so the scout brief, the cold-retrieval TOC, AND the FINALIZE/CONTINUE loop
+control all vanish with NO error, and the run would still be LABELED "dasein v9 A3S" while measuring
+only half the product. Likewise, if ``DASEIN_UPSTREAM_BASE`` is unprovisioned, the always-on proxy
+seam itself ``RuntimeError``s on the first ``/v1/messages`` request (it has no gateway to forward to).
+So ``ready()`` GATES on BOTH (and pings the runner CLI), mirroring ``woz.ready()``/``rtk.ready()``:
+a missing hook runner / unprovisioned upstream SKIPs cleanly with a precise, actionable reason —
+never schedules a proxy-only run mislabeled as the full v9 product.
+
 Env:
-  DASEIN_API_KEY   — bearer token for the hosted service (dsk_...).
-  DASEIN_BASE_URL  — Anthropic-speaking base URL of the Dasein service (its upstream = the gateway).
-  DASEIN_HOOK_CMD  — (optional) argv for the harness-runner CLI; enables scout/cold/adjudicator.
-                     Unset -> proxy-only (curator/no-reread/governor still run server-side).
+  DASEIN_API_KEY      — bearer token for the hosted service (dsk_...).
+  DASEIN_BASE_URL     — Anthropic-speaking base URL of the Dasein service (its upstream = the gateway).
+  DASEIN_HOOK_CMD     — argv for the harness-runner CLI; enables scout/cold/adjudicator (the agent-loop
+                        half of v9). REQUIRED for a faithful v9 run — ready() gates on it + a live ping.
+  DASEIN_UPSTREAM_BASE — the per-run usage-gateway URL the runner prints; the service forwards the
+                        native Anthropic body here. REQUIRED — the proxy seam RuntimeErrors without it.
+                        ready() gates on it being present (its value is the gateway, known at run time;
+                        the gate only checks the operator wired the provisioning step).
 """
 
 from __future__ import annotations
@@ -59,7 +76,10 @@ _CONTINUE_STEER = (
 @register("dasein")
 class DaseinArm(ProxyArm):
     name = "dasein"
-    needs = ["DASEIN_API_KEY", "DASEIN_BASE_URL"]
+    # The proxy seam needs the service URL + key; the agent-loop seam (scout/cold/adjudicator) needs
+    # the runner CLI; the proxy's native upstream needs the gateway base. ready() gates on ALL of
+    # them so a proxy-only run is never mislabeled as the full v9 product (see module docstring).
+    needs = ["DASEIN_API_KEY", "DASEIN_BASE_URL", "DASEIN_HOOK_CMD", "DASEIN_UPSTREAM_BASE"]
 
     def __init__(self) -> None:
         # per-(instance) problem statement cache so stop_decision (which only gets cwd/session_id)
@@ -67,6 +87,60 @@ class DaseinArm(ProxyArm):
         # may fire hooks from async callbacks).
         self._problem_by_dir: dict[str, str] = {}
         self._lock = threading.Lock()
+
+    # ── readiness gate (faithful v9 requires BOTH seams wired) ────────────────
+    def ready(self) -> tuple[bool, str]:
+        """Ready iff the FULL v9 A3S can run: the proxy seam (DASEIN_API_KEY + DASEIN_BASE_URL),
+        the agent-loop seam (DASEIN_HOOK_CMD, with a LIVE runner that imports the real scout / cold /
+        submit-adjudicator), and the native upstream (DASEIN_UPSTREAM_BASE) are ALL provisioned.
+
+        Why gate this hard (mirroring woz.ready()/rtk.ready()): with DASEIN_HOOK_CMD unset, the two
+        harness hooks fail-open to None — the scout brief, cold-retrieval TOC, and FINALIZE/CONTINUE
+        loop control silently vanish, yet the run is still labeled v9; with DASEIN_UPSTREAM_BASE
+        unset, the always-on proxy seam RuntimeErrors on the first /v1/messages request. Either way
+        a faithful v9 run is impossible, so we SKIP cleanly with a precise reason instead of
+        measuring a fraction of the product as the whole.
+
+        The env presence is checked by super().ready() (DASEIN_HOOK_CMD/DASEIN_UPSTREAM_BASE are in
+        `needs`); on top of that we PING the runner CLI (`<DASEIN_HOOK_CMD> ping`) and require it to
+        report the submit-adjudicator importable (`ok`), so a half-installed runner — missing
+        adaptive_context / the dasein pkg on the runner box — SKIPs here rather than dying as an
+        empty-brief / always-CONTINUE no-op for every task."""
+        ok, reason = super().ready()        # all four `needs` env vars present & non-empty
+        if not ok:
+            return ok, reason
+        argv = self._hook_cmd()
+        if not argv:
+            # DASEIN_HOOK_CMD is set (super().ready passed) but unparseable.
+            return False, (
+                f"DASEIN_HOOK_CMD is set but could not be parsed into an argv: "
+                f"{os.environ.get('DASEIN_HOOK_CMD')!r}. It must be the runner CLI invocation, e.g. "
+                f"'/srv/dasein/.venv/bin/python -m service.harness_runners'.")
+        ping = self._run_hook("ping", {})
+        if ping is None:
+            return False, (
+                f"the v9 harness-runner CLI did not respond to a `ping` "
+                f"({' '.join(argv)} ping). The agent-loop half of v9 (scout turn-0 brief, "
+                f"cold-retrieval TOC, SUBMIT adjudicator loop control) cannot run, so this would "
+                f"silently degrade to a proxy-only run mislabeled as v9. Deploy the "
+                f"dasein-compression-service (adaptive_context + the dasein pkg) on the runner box "
+                f"and point DASEIN_HOOK_CMD at its venv python -m service.harness_runners.")
+        if not ping.get("ok"):
+            stages = ping.get("stages") or {}
+            missing = [k for k in ("scout", "cold", "adjudicate") if not stages.get(k)]
+            return False, (
+                f"the v9 harness runner is reachable but a required stage is not importable "
+                f"(missing: {', '.join(missing) or 'adjudicate'}). The runner box is missing part of "
+                f"the real product (adaptive_context.meta.adjudicator_submit / optimizer.scout / "
+                f"candidates.repo_index2 / the dasein pkg). Fix the runner venv before running — a "
+                f"v9 run without the SUBMIT adjudicator is not the product.")
+        stages = ping.get("stages") or {}
+        warn = ""
+        if not stages.get("scout"):
+            warn += " WARN scout not importable (cold-retrieval fallback only);"
+        if not stages.get("cold"):
+            warn += " WARN cold-retrieval not importable;"
+        return True, f"ok (v9 runner live: {' '.join(argv)}){warn}"
 
     # ── ProxyArm surface ──────────────────────────────────────────────────────
     def model_base_url(self) -> str:

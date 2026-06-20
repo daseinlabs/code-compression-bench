@@ -32,22 +32,29 @@ if str(_ROOT) not in sys.path:
 
 
 def _fake_runner(tmpdir: Path, *, step0_brief: str = "SCOUT BRIEF: edit src/foo.py",
-                 verdict: str = "CONTINUE", broken: bool = False) -> str:
+                 verdict: str = "CONTINUE", broken: bool = False, ping_ok: bool = True,
+                 name: str = "fake_runner.py") -> str:
     """Write a fake harness-runner CLI and return a DASEIN_HOOK_CMD argv string for it.
 
-    The fake mimics `service.harness_runners`: argv[1] is the command (step0|adjudicate), JSON on
-    stdin, JSON on stdout. `broken=True` exits non-zero (to exercise the fail-open path)."""
-    script = tmpdir / "fake_runner.py"
+    The fake mimics `service.harness_runners`: argv[1] is the command (ping|step0|adjudicate), JSON
+    on stdin, JSON on stdout. `broken=True` exits non-zero (to exercise the fail-open path);
+    `ping_ok=False` makes the `ping` command report the submit-adjudicator missing (to exercise the
+    ready() readiness gate on a half-installed runner)."""
+    script = tmpdir / name
     body = (
         "import sys, json\n"
         f"BROKEN = {broken!r}\n"
         f"BRIEF = {step0_brief!r}\n"
         f"VERDICT = {verdict!r}\n"
+        f"PING_OK = {ping_ok!r}\n"
         "if BROKEN:\n"
         "    sys.exit(3)\n"
         "cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n"
         "payload = json.loads(sys.stdin.read() or '{}')\n"
-        "if cmd == 'step0':\n"
+        "if cmd == 'ping':\n"
+        "    out = {'ok': PING_OK, 'scout': PING_OK, 'cold': PING_OK, 'adjudicate': PING_OK,\n"
+        "           'stages': {'scout': PING_OK, 'cold': PING_OK, 'adjudicate': PING_OK}}\n"
+        "elif cmd == 'step0':\n"
         "    out = {'brief': BRIEF, 'stats': {'reported': True}, 'source': 'scout',\n"
         "           'echo_repo': payload.get('repo_dir')}\n"
         "elif cmd == 'adjudicate':\n"
@@ -59,6 +66,14 @@ def _fake_runner(tmpdir: Path, *, step0_brief: str = "SCOUT BRIEF: edit src/foo.
     )
     script.write_text(body, encoding="utf-8")
     return f"{sys.executable} {script}"
+
+
+def _full_env(tmp_path: Path, **kw) -> None:
+    """Set the full v9 env (proxy + hook + upstream) so ready() can pass; tests tweak from here."""
+    os.environ["DASEIN_API_KEY"] = "dsk_test"
+    os.environ["DASEIN_BASE_URL"] = "https://dasein.example/"
+    os.environ["DASEIN_UPSTREAM_BASE"] = "http://127.0.0.1:9999"
+    os.environ["DASEIN_HOOK_CMD"] = _fake_runner(tmp_path, **kw)
 
 
 def _arm():
@@ -89,6 +104,69 @@ def test_kind_and_declared_hooks():
     assert getattr(type(arm), "stop_decision") is not getattr(Arm, "stop_decision")
     # the arm is NOT a pre-tool rewrite arm (that's rtk) — must stay the base no-op
     assert getattr(type(arm), "pre_tool_hook") is getattr(Arm, "pre_tool_hook")
+
+
+# ── ready() faithfulness gate (BOTH seams must be wired, mirroring woz/rtk) ────
+def _clear_dasein_env():
+    for k in ("DASEIN_API_KEY", "DASEIN_BASE_URL", "DASEIN_HOOK_CMD", "DASEIN_UPSTREAM_BASE",
+              "CCB_RUN_ID", "DASEIN_CONV_ID"):
+        os.environ.pop(k, None)
+
+
+def test_ready_ok_with_full_v9_wiring(tmp_path):
+    _clear_dasein_env()
+    _full_env(tmp_path)                       # proxy + live runner ping + upstream base
+    ok, reason = _arm().ready()
+    assert ok is True, reason
+    assert "v9 runner live" in reason
+
+
+def test_ready_skips_without_hook_cmd(tmp_path):
+    """DASEIN_HOOK_CMD unset -> scout/cold/adjudicator vanish -> SKIP (never a proxy-only 'v9')."""
+    _clear_dasein_env()
+    os.environ["DASEIN_API_KEY"] = "dsk_test"
+    os.environ["DASEIN_BASE_URL"] = "https://dasein.example/"
+    os.environ["DASEIN_UPSTREAM_BASE"] = "http://127.0.0.1:9999"
+    # DASEIN_HOOK_CMD deliberately unset
+    ok, reason = _arm().ready()
+    assert ok is False
+    assert "DASEIN_HOOK_CMD" in reason
+
+
+def test_ready_skips_without_upstream_base(tmp_path):
+    """DASEIN_UPSTREAM_BASE unset -> the proxy seam RuntimeErrors on first /v1/messages -> SKIP."""
+    _clear_dasein_env()
+    os.environ["DASEIN_API_KEY"] = "dsk_test"
+    os.environ["DASEIN_BASE_URL"] = "https://dasein.example/"
+    os.environ["DASEIN_HOOK_CMD"] = _fake_runner(tmp_path)
+    # DASEIN_UPSTREAM_BASE deliberately unset
+    ok, reason = _arm().ready()
+    assert ok is False
+    assert "DASEIN_UPSTREAM_BASE" in reason
+
+
+def test_ready_skips_when_runner_ping_unreachable(tmp_path):
+    """DASEIN_HOOK_CMD set but the runner errors on ping -> SKIP (half-installed runner)."""
+    _clear_dasein_env()
+    os.environ["DASEIN_API_KEY"] = "dsk_test"
+    os.environ["DASEIN_BASE_URL"] = "https://dasein.example/"
+    os.environ["DASEIN_UPSTREAM_BASE"] = "http://127.0.0.1:9999"
+    os.environ["DASEIN_HOOK_CMD"] = _fake_runner(tmp_path, broken=True)  # exits non-zero on any cmd
+    ok, reason = _arm().ready()
+    assert ok is False
+    assert "did not respond to a `ping`" in reason
+
+
+def test_ready_skips_when_adjudicator_not_importable(tmp_path):
+    """Runner reachable but the SUBMIT adjudicator stage isn't importable -> SKIP (not the product)."""
+    _clear_dasein_env()
+    os.environ["DASEIN_API_KEY"] = "dsk_test"
+    os.environ["DASEIN_BASE_URL"] = "https://dasein.example/"
+    os.environ["DASEIN_UPSTREAM_BASE"] = "http://127.0.0.1:9999"
+    os.environ["DASEIN_HOOK_CMD"] = _fake_runner(tmp_path, ping_ok=False)
+    ok, reason = _arm().ready()
+    assert ok is False
+    assert "required stage is not importable" in reason
 
 
 # ── step0_injection (scout/cold via the runner) ───────────────────────────────

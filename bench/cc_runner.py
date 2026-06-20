@@ -492,6 +492,11 @@ async def _run_sdk(
     # (For proxy arms the vendor proxy must forward this header to the gateway —
     # smoke item; see the report.)
     env["ANTHROPIC_CUSTOM_HEADERS"] = f"{RUN_ID_HEADER}: {run_id}"
+    # The per-(instance,arm) run id, also exported as CCB_RUN_ID so an arm that keys per-run state
+    # on it (e.g. dasein's conversation id, used to hold ONE live A3S triple per solve) reads the
+    # SAME stable id Claude Code forwards as the run-id header. Documentation-honesty: makes the
+    # arm's CCB_RUN_ID branch live rather than dead (the gateway/service also see x-ccb-run-id).
+    env["CCB_RUN_ID"] = run_id
     env.setdefault("ANTHROPIC_MODEL", model)
     # Dummy/bridge auth token: Claude Code needs a NON-EMPTY auth token to attach,
     # but the real Vertex credential is ADC held by the gateway. We set
