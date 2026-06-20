@@ -90,7 +90,7 @@ from bench.schema import RunRecord
 # — safe to import eagerly; we need RUN_ID_HEADER to tag Claude Code's forwarded
 # usage and the Vertex defaults to wire the bottom bridge.
 from bench.usage_gateway import (
-    MODE_VERTEX, RUN_ID_HEADER, UsageGateway,
+    MODE_VERTEX, RUN_ID_HEADER, UsageGateway, UsageSink,
     VERTEX_LOCATION, VERTEX_MODEL, VERTEX_PROJECT,
 )
 
@@ -117,6 +117,24 @@ GATEWAY_MODE = MODE_VERTEX
 # credential is ADC held by the gateway, never by Claude Code. Overridable via env
 # only if a vendor proxy expects a specific bearer (set per-vendor at provisioning).
 BRIDGE_AUTH_TOKEN = os.environ.get("CCB_BRIDGE_AUTH_TOKEN", "ccb-bridge-token")
+
+# ── shared standalone gateway (optional; see bench.gateway_server) ────────────
+# By default run_agent starts a FRESH per-(instance,arm) UsageGateway on an
+# ephemeral 127.0.0.1:0 port. A vendor proxy can't be provisioned to chase a random
+# port, so a STANDALONE gateway (``python -m bench.gateway_server --port P --usage-dir D``)
+# can be launched once at a FIXED address and SHARED by every worker/run. Set:
+#   CCB_GATEWAY_URL       — the shared gateway's fixed URL (e.g. http://127.0.0.1:8080).
+#                           When set, run_agent does NOT start a per-run gateway: it
+#                           points the gateway-direct arms (baseline/woz) at this URL,
+#                           and proxy arms keep pointing at the vendor proxy (whose
+#                           UPSTREAM is provisioned to this same URL).
+#   CCB_GATEWAY_USAGE_DIR — the shared gateway's --usage-dir; run_agent reads each
+#                           run's usage from <CCB_GATEWAY_USAGE_DIR>/<run_id>.usage.jsonl
+#                           (the run-id header isolates each run's rows).
+# When CCB_GATEWAY_URL is UNSET the behaviour is EXACTLY the current per-run
+# ephemeral one (full back-compat — baseline/woz still work as today).
+SHARED_GATEWAY_URL = (os.environ.get("CCB_GATEWAY_URL") or "").strip()
+SHARED_GATEWAY_USAGE_DIR = (os.environ.get("CCB_GATEWAY_USAGE_DIR") or "").strip()
 
 # Native Claude Code tools the agent may use by default (the fixed scaffold's
 # surface). A ToolArm with replace_tools removes the file-mutation/search tools
@@ -657,6 +675,45 @@ def _capture_patch(repo_dir: str) -> str:
         return ""
 
 
+# ── gateway resolution: SHARED standalone vs per-(instance,arm) ephemeral ─────
+def _resolve_gateway(out_dir: str, run_id: str, wall_cap_s: int):
+    """Resolve the bottom-bridge gateway for this solve.
+
+    Returns ``(base_url, usage_path, stop_fn)``:
+
+      * SHARED  (``CCB_GATEWAY_URL`` set) — DO NOT start a per-run gateway. Use the
+        external shared gateway (``python -m bench.gateway_server``) at its FIXED
+        address; usage is read from ``<CCB_GATEWAY_USAGE_DIR>/<run_id>.usage.jsonl``
+        (the run-id header isolates each run's rows). The path is derived with the
+        SAME sanitization the gateway's ``UsageSink`` uses, so the names always
+        line up. ``stop_fn`` is a no-op — this process doesn't own the shared
+        gateway, so it must NOT shut it down (other workers/runs are using it).
+      * PER-RUN (default — ``CCB_GATEWAY_URL`` unset) — start a FRESH UsageGateway on
+        an ephemeral ``127.0.0.1:0`` port (the EXACT current behaviour), returning
+        its ``base_url`` / ``usage_path(run_id)`` / ``stop`` so the solve is
+        byte-for-byte what it was before the shared-gateway option existed.
+    """
+    if SHARED_GATEWAY_URL:
+        usage_dir = SHARED_GATEWAY_USAGE_DIR or str(Path(out_dir) / "usage")
+        # Reuse UsageSink's path/sanitization so the file name matches the one the
+        # SHARED gateway writes for this run id (no creation of a gateway/server).
+        usage_path = UsageSink(usage_dir).path_for(run_id)
+        return SHARED_GATEWAY_URL.rstrip("/"), usage_path, (lambda: None)
+
+    # default: a per-(instance,arm) ephemeral gateway (full back-compat).
+    usage_dir = str(Path(out_dir) / "usage")
+    gw = UsageGateway(
+        log_dir=usage_dir,
+        default_run_id=run_id,
+        timeout_s=float(wall_cap_s),
+        mode=GATEWAY_MODE,                 # vertex
+        vertex_model=VERTEX_MODEL,
+        vertex_project=VERTEX_PROJECT,
+        vertex_location=VERTEX_LOCATION,
+    ).start()
+    return gw.base_url, gw.usage_path(run_id), gw.stop
+
+
 # ── the per-(instance, arm) solve ─────────────────────────────────────────────
 def run_agent(
     arm,
@@ -674,10 +731,12 @@ def run_agent(
 ) -> dict:
     """Drive one headless Claude Code solve for (instance, arm) and return raw signals.
 
-    Builds the arm->SDK config, starts a per-run usage gateway pointed at the arm's
-    upstream, runs the SDK to completion against the task repo (cwd), captures the
-    patch via git, and returns a dict of raw run signals + the gateway usage path.
-    No grading here — the caller grades the returned patch.
+    Builds the arm->SDK config, resolves the bottom-bridge usage gateway (a SHARED
+    standalone one at CCB_GATEWAY_URL when set — so a vendor proxy can be provisioned
+    to a fixed address — else a per-run ephemeral one, the default), runs the SDK to
+    completion against the task repo (cwd), captures the patch via git, and returns a
+    dict of raw run signals read from the gateway's per-run usage JSONL. No grading
+    here — the caller grades the returned patch.
     """
     # One-time arm prep (e.g. the Woz CLI login that authenticates its MCP
     # server). A setup failure surfaces as an infra failure for THIS arm.
@@ -706,29 +765,28 @@ def run_agent(
 
     # The gateway is ALWAYS the bottom bridge to Vertex (claude-sonnet on Vertex
     # via litellm + ADC). It captures the real post-compression usage regardless
-    # of whether a vendor proxy sits above it.
-    usage_dir = str(Path(out_dir) / "usage")
-    gw = UsageGateway(
-        log_dir=usage_dir,
-        default_run_id=run_id,
-        timeout_s=float(wall_cap_s),
-        mode=GATEWAY_MODE,                 # vertex
-        vertex_model=VERTEX_MODEL,
-        vertex_project=VERTEX_PROJECT,
-        vertex_location=VERTEX_LOCATION,
-    ).start()
+    # of whether a vendor proxy sits above it. EITHER a SHARED standalone gateway
+    # at a FIXED address (CCB_GATEWAY_URL, so a vendor proxy can be provisioned to
+    # it) OR a FRESH per-(instance,arm) one on an ephemeral port (the default —
+    # full back-compat). gateway_base_url/gateway_usage_path/stop_gateway abstract
+    # the two so the rest of the solve is identical.
+    gateway_base_url, gateway_usage_path, stop_gateway = _resolve_gateway(
+        out_dir, run_id, wall_cap_s)
 
     # Where Claude Code points: the vendor proxy (proxy arms) or the gateway
     # directly (A0/woz). For proxy arms the vendor proxy's UPSTREAM must be this
-    # gateway URL — a provisioning requirement we log so it can be verified.
-    client_base_url = arm_cfg.client_base_url or gw.base_url
+    # gateway URL — a provisioning requirement we log so it can be verified. We
+    # also surface the gateway URL plainly so provisioning can confirm each
+    # vendor's configured upstream == CCB_GATEWAY_URL.
+    client_base_url = arm_cfg.client_base_url or gateway_base_url
     if arm_cfg.proxy_base_url:
         print(f"  chain [{arm.name}]: ClaudeCode -> {arm_cfg.proxy_base_url} "
-              f"(vendor proxy; its UPSTREAM must be {gw.base_url}) -> Vertex "
+              f"(vendor proxy; its UPSTREAM must be {gateway_base_url}) -> Vertex "
               f"({VERTEX_MODEL})", flush=True)
     else:
-        print(f"  chain [{arm.name}]: ClaudeCode -> {gw.base_url} (gateway) -> "
+        print(f"  chain [{arm.name}]: ClaudeCode -> {gateway_base_url} (gateway) -> "
               f"Vertex ({VERTEX_MODEL})", flush=True)
+    print(f"  gateway [{arm.name}]: CCB_GATEWAY_URL={gateway_base_url}", flush=True)
 
     t0 = time.time()
     exit_status = "incomplete"
@@ -751,10 +809,10 @@ def run_agent(
             arm.teardown()
         except Exception:
             pass
-        gw.stop()
+        stop_gateway()
         raise RunInfraError(f"{type(e).__name__}: {str(e)[:300]}") from e
     finally:
-        gw.stop()
+        stop_gateway()
         try:
             arm.teardown()
         except Exception:
@@ -765,7 +823,9 @@ def run_agent(
     submitted = bool(patch.strip())
 
     # the authoritative per-CALL usage series: the gateway JSONL rows (cache split).
-    usage = _read_usage_rows(gw.usage_path(run_id))
+    # For a SHARED gateway this is <CCB_GATEWAY_USAGE_DIR>/<run_id>.usage.jsonl; for
+    # a per-run gateway it's the in-process gateway's path. Both isolate by run id.
+    usage = _read_usage_rows(gateway_usage_path)
 
     # write the native SDK trajectory dump (best-effort; never crash a paid run).
     if traj_path:

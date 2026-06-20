@@ -75,10 +75,23 @@ rtk             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway �
   above it; only the gateway bridges to Vertex. Claude Code is handed a dummy **bridge token**
   (`ANTHROPIC_AUTH_TOKEN`); the real Vertex credential lives on the gateway.
 - **Per-vendor upstream config (provisioning requirement):** each PROXY arm must be configured to
-  forward to the gateway URL (the runner prints it per run). See `arms/README.md` for exactly where that
-  upstream is set for edgee / headroom / compresr / dasein. (**rtk is NOT a proxy** — it's the rtk-ai/rtk
-  binary run as a PreToolUse hook; install the binary on the runner, the model goes straight to the
-  gateway like A0, and there is no upstream to set.)
+  forward to the gateway URL. By default the runner starts a fresh gateway per solve on a random
+  ephemeral port — fine for baseline/woz, but a vendor proxy can't chase a moving port. For the proxy
+  arms, launch the **shared standalone gateway** at a FIXED address instead and point every vendor's
+  upstream at it (once):
+
+  ```bash
+  # one long-lived gateway on a fixed port (Vertex bridge, run-id-isolated, ThreadingHTTPServer)
+  python -m bench.gateway_server --port 8080 --usage-dir runs/usage    # prints CCB_GATEWAY_URL=...
+  # then run the bench against it — baseline/woz point at it; proxy arms' upstream is provisioned to it
+  CCB_GATEWAY_URL=http://127.0.0.1:8080 CCB_GATEWAY_USAGE_DIR=runs/usage \
+    python -m bench.cc_runner --arms baseline,dasein ...
+  ```
+
+  When `CCB_GATEWAY_URL` is unset the per-run ephemeral behaviour is unchanged. See `arms/README.md`
+  for exactly where that upstream is set for edgee / headroom / compresr / dasein. (**rtk is NOT a
+  proxy** — it's the rtk-ai/rtk binary run as a PreToolUse hook; install the binary on the runner, the
+  model goes straight to the gateway like A0, and there is no upstream to set.)
 
 ## Leaderboard
 
