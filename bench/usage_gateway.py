@@ -334,6 +334,35 @@ _NATIVE_PASSTHROUGH_FIELDS = (
 )
 
 
+# ── transient Vertex error retry (robustness) ────────────────────────────────
+# A single transient upstream error (Vertex overloaded / 429 / 5xx / timeout /
+# connection reset) must NOT break a run — it would surface to the Dasein service
+# as a 502, break the SSE stream, and force a full (expensive) run restart. The
+# gateway BUFFERS all stream events before relaying anything downstream, so the
+# whole create+buffer can be retried cleanly. Backoff below; a non-transient error
+# or exhausted retries still 502s.
+_VERTEX_MAX_RETRIES = 4
+_VERTEX_RETRY_BACKOFF = (1.0, 2.0, 4.0, 8.0)
+_TRANSIENT_MARKERS = (
+    "overloaded", "rate limit", "rate_limit", "429", "500", "502", "503", "504",
+    "bad gateway", "service unavailable", "internal server", "timeout", "timed out",
+    "deadline", "connection", "econnreset", "reset by peer", "temporarily",
+    "try again", "unavailable", "api_error",
+)
+
+
+def _is_transient_vertex_error(exc) -> bool:
+    """True if ``exc`` looks like a TRANSIENT Vertex/upstream error worth retrying
+    (rate limit, 5xx, timeout, connection reset) vs a permanent request error."""
+    code = getattr(exc, "status_code", None)
+    if code is None:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+    if code in (408, 409, 429, 500, 502, 503, 504):
+        return True
+    s = (str(exc) or "").lower() + " " + type(exc).__name__.lower()
+    return any(m in s for m in _TRANSIENT_MARKERS)
+
+
 def _anthropic_create_kwargs(body: dict, model: str) -> dict:
     """Build ``client.messages.create(**kwargs)`` from an inbound Anthropic body.
 
@@ -698,22 +727,32 @@ def make_handler(upstream_base: str, sink: UsageSink,
             if betas:
                 kwargs["extra_headers"] = {"anthropic-beta": betas}
             client_wants_stream = bool(req_body.get("stream"))
-            try:
-                event_stream = _complete(kwargs)
-            except Exception as e:  # noqa: BLE001 — AnthropicVertex/upstream/ADC error
-                self._gateway_error(502, f"vertex upstream error: "
-                                    f"{type(e).__name__}: {str(e)[:200]}")
-                return
-
-            # Consume the native events. ITERATING the stream is what avoids the
-            # SDK's "streaming required" guard; buffering the (type, data) pairs is
-            # fine — they're small and we need the full set to capture final usage
-            # and (for a non-stream client) reconstruct the message.
-            try:
-                ev_dicts = [(_event_type(e), _event_data(e)) for e in event_stream]
-            except Exception as e:  # noqa: BLE001 — mid-stream upstream/ADC error
-                self._gateway_error(502, f"vertex stream error: "
-                                    f"{type(e).__name__}: {str(e)[:200]}")
+            # ROBUSTNESS: retry the WHOLE create+buffer on a TRANSIENT Vertex error.
+            # Iterating the stream is what avoids the SDK's "streaming required" guard;
+            # buffering the (type, data) pairs is fine — they're small and we need the
+            # full set for usage capture / non-stream reconstruction. Because nothing
+            # is relayed downstream until AFTER this buffer, a transient blip can be
+            # retried cleanly instead of breaking the run.
+            ev_dicts = None
+            last_err = None
+            for attempt in range(_VERTEX_MAX_RETRIES + 1):
+                try:
+                    event_stream = _complete(kwargs)
+                    ev_dicts = [(_event_type(e), _event_data(e)) for e in event_stream]
+                    break
+                except Exception as e:  # noqa: BLE001 — AnthropicVertex/upstream/ADC error
+                    last_err = e
+                    if attempt < _VERTEX_MAX_RETRIES and _is_transient_vertex_error(e):
+                        delay = _VERTEX_RETRY_BACKOFF[min(attempt, len(_VERTEX_RETRY_BACKOFF) - 1)]
+                        print(f"  usage_gateway: transient Vertex error "
+                              f"({type(e).__name__}: {str(e)[:120]}) — retry "
+                              f"{attempt + 1}/{_VERTEX_MAX_RETRIES} in {delay}s", flush=True)
+                        time.sleep(delay)
+                        continue
+                    break
+            if ev_dicts is None:
+                self._gateway_error(502, f"vertex upstream error (after retries): "
+                                    f"{type(last_err).__name__}: {str(last_err)[:200]}")
                 return
 
             # Pre-build the verbatim SSE frames once; usage is parsed from the same
