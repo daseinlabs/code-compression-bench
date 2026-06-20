@@ -19,16 +19,32 @@ Check readiness: each arm's `.ready()` returns `(ok, reason)` based on its `need
 Built in (`bench.arm.BaselineArm`), always ready, needs nothing. `transform` returns the
 messages unchanged so the same call path is exercised as every other arm.
 
-## dasein — hosted, keyed (ProxyArm)
-Dasein's hosted endpoint compresses server-side. The public repo holds only the thin client.
+## dasein — hosted v9 A3S (ProxyArm + harness hooks)
+Dasein's product is **v9 A3S**: scout (turn-0 brief) -> cold-retrieval (step-0 TOC) -> curator
+(every turn) -> no-reread -> governor + SUBMIT adjudicator. Under Claude Code it runs across two
+seams. The PROXY seam is server-side (curator/no-reread/governor): the Dasein service speaks the
+native Anthropic Messages API, compresses each turn, and forwards to the run gateway. The
+HARNESS-HOOK seam runs the agent-loop-owned parts a passive proxy can't (an agentic walk; owning
+the loop's stop): the arm overrides `step0_injection` (scout, else cold-retrieval) and
+`stop_decision` (the SUBMIT adjudicator's FINALIZE/CONTINUE), which `cc_runner._build_harness_hooks`
+wires into the SDK (system-prompt append at step 0; a Stop hook for loop control).
 
-- **Env:** `DASEIN_API_KEY` (`dsk_...`), `DASEIN_BASE_URL`.
-- **Run:** set both env vars, then `make bench ARM=dasein`. No local service to launch.
-- **Topology:** Claude Code points `ANTHROPIC_BASE_URL` at `DASEIN_BASE_URL`; the Dasein
-  service's OWN upstream must forward to this run's gateway URL (the runner prints it), so the
-  chain is `Claude Code -> Dasein (compresses) -> gateway -> Vertex`. The Dasein service
+- **Env:**
+  - `DASEIN_API_KEY` (`dsk_...`), `DASEIN_BASE_URL` (**required**) — the hosted service.
+  - `DASEIN_HOOK_CMD` (**required for the scout/cold/adjudicator hooks**) — argv for the private
+    `dasein-compression-service`'s harness-runner CLI on the box, e.g.
+    `DASEIN_HOOK_CMD="/srv/dasein/.venv/bin/python -m service.harness_runners"`. The arm SHELLS OUT
+    to it (clean-room: the public repo never imports `adaptive_context`); the runner runs the REAL
+    `scout_brief` / `cold_retrieval_block` / `AdjudicatorSubmit`. Unset -> proxy-only (curator +
+    no-reread + governor still run server-side); the hooks fail OPEN, never crashing a paid run.
+  - `DASEIN_HOOK_TIMEOUT_S` (optional, default 300) — per-hook subprocess timeout.
+- **Run:** set the env, then `make bench ARM=dasein`. No local model service to launch.
+- **Topology:** Claude Code points `ANTHROPIC_BASE_URL` at `DASEIN_BASE_URL`; the Dasein service's
+  OWN upstream (`DASEIN_UPSTREAM_BASE`) must be this run's gateway URL (the runner prints it), so
+  the chain is `Claude Code -> Dasein (compresses) -> gateway -> Vertex`. The Dasein service
   authenticates its own key and is configured (at provisioning) with the gateway as upstream;
-  Claude Code talks Anthropic to Dasein directly.
+  Claude Code talks native Anthropic to Dasein directly. The arm forwards `CCB_RUN_ID` (and Claude
+  Code forwards `x-ccb-run-id` on every request), so the service keys ONE live A3S triple per run.
 
 ## woz — WOZCODE Claude Code plugin loaded whole (ToolArm, paid)
 Woz is a paid Claude Code **plugin** ([github.com/WithWoz/wozcode-plugin](https://github.com/WithWoz/wozcode-plugin),
