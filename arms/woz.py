@@ -211,6 +211,79 @@ def _node_version(exe: str) -> tuple[int, int, int] | None:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+# Substrings the Woz CLI prints when there is NO usable session. Captured live on
+# cc-bench (2026-06-20): an absent login prints "Not logged in." and a present but
+# expired/server-revoked session prints "WozCode session is stale. Please log in
+# again using /woz-login." In BOTH cases ``status`` exits non-zero. We gate on
+# exit-code-0 AND the absence of these markers so a stale OR absent session SKIPs.
+_SESSION_FAIL_MARKERS = (
+    "not logged in",
+    "session is stale",
+    "log in again",
+    "/woz-login",
+    "auth.login_required",
+    "please log in",
+    "re-authenticate",
+)
+
+
+def _session_authenticated(timeout: int = 30) -> tuple[bool, str]:
+    """Probe whether a VALID Woz session is stored under ``~/.claude/wozcode/``.
+
+    Runs ``<node> <WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js status`` (the same CLI
+    ``setup()`` logs in with) and returns (authenticated, detail). The MCP server
+    serves ``Search`` against this stored session; if it is absent OR stale, every
+    ``mcp__plugin_woz_code__*`` call returns ``auth.login_required`` and the arm
+    produces NO patch — so we gate ``ready()`` on a live session and SKIP cleanly
+    rather than scheduling work that dies as an infra failure for every task.
+
+    A session is considered authenticated iff ``status`` exits 0 AND its combined
+    stdout/stderr contains none of ``_SESSION_FAIL_MARKERS`` (the CLI prints the
+    authenticated identity on success, and one of these markers + a non-zero exit
+    when there is no usable session). Probe errors (node/CLI missing, timeout) are
+    reported as NOT authenticated with the reason, never as authenticated — a
+    failed probe must not let a sessionless arm run.
+
+    Honors ``WOZ_SKIP_SESSION_CHECK=1`` to bypass the probe (for tests / when the
+    operator has out-of-band proof a session exists); returns (True, "...") then.
+    """
+    if os.environ.get("WOZ_SKIP_SESSION_CHECK", "").strip() in ("1", "true", "True"):
+        return True, "session check bypassed (WOZ_SKIP_SESSION_CHECK)"
+
+    cli = _login_cli()
+    if cli is None:
+        return False, "WOZ_PLUGIN_DIR unset; cannot locate scripts/wozcode-cli.js"
+    if not os.path.exists(cli):
+        return False, f"Woz login CLI missing: {cli!r}"
+
+    node = _node_exe()
+    env = dict(os.environ)
+    env["CLAUDE_PLUGIN_ROOT"] = os.environ.get("WOZ_PLUGIN_DIR", "")
+    node_dir = os.path.dirname(node)
+    if node_dir and os.path.isdir(node_dir):
+        env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
+
+    argv = [node, *_NODE_FLAGS, cli, "status"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, env=env
+        )
+    except Exception as e:  # noqa: BLE001 — a probe failure must gate, not pass
+        return False, f"status probe failed to run ({type(e).__name__}: {e})"
+
+    blob = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    low = blob.lower()
+    if any(m in low for m in _SESSION_FAIL_MARKERS):
+        return False, f"no valid Woz session: {blob[-200:]!r}"
+    if proc.returncode != 0:
+        return False, (
+            f"Woz status exited {proc.returncode} (treated as unauthenticated): "
+            f"{blob[-200:]!r}"
+        )
+    # Exit 0 and no failure marker → the CLI printed the authenticated identity.
+    return True, (blob[-160:] or "authenticated")
+
+
 class WozLoginError(RuntimeError):
     """The one-time Woz CLI login failed (bad key, node error, missing CLI)."""
 
@@ -238,9 +311,20 @@ class WozArm(ToolArm):
     def ready(self) -> tuple[bool, str]:
         """Ready iff WOZ_API_KEY is set AND the REAL plugin is present on disk
         (``.claude-plugin/plugin.json`` + ``agents/explore.md``) AND node >= 20.12
-        resolves. The runner loads the whole plugin via the SDK, so what must exist
-        is the plugin tree (its subagents/MCP/hooks), not a server we spawn. Skips
-        cleanly with a precise reason when Woz isn't installed / node is too old."""
+        resolves AND a VALID login session is stored under ``~/.claude/wozcode/``.
+
+        The session gate is the one that keeps a sessionless arm from being
+        scheduled and then dying as an infra failure for EVERY task: the plugin's
+        ``code`` MCP server serves ``Search``/``Edit``/``Recall``/``Sql`` from the
+        stored login, so without a live session every ``mcp__plugin_woz_code__*``
+        call returns ``auth.login_required`` and (native file tools disallowed by
+        design) the agent has no working tools → empty patch. We run the plugin's
+        own ``wozcode-cli.js status`` and require it to report authenticated; a
+        stale OR absent login SKIPs cleanly with a precise, actionable reason
+        instead of being run. The runner loads the whole plugin via the SDK, so
+        what must exist is the plugin tree (its subagents/MCP/hooks), not a server
+        we spawn. Skips cleanly when Woz isn't installed / node is too old / the
+        login is stale or absent."""
         ok, reason = super().ready()  # checks WOZ_API_KEY is set & non-empty
         if not ok:
             return ok, reason
@@ -279,7 +363,22 @@ class WozArm(ToolArm):
                 f"(needs >= {_MIN_NODE[0]}.{_MIN_NODE[1]}: it imports util.styleText, "
                 f"added in Node 20.12). Set WOZ_NODE to a node >= 20.12."
             )
-        return True, "ok"
+        # Valid-session gate: without a live login under ~/.claude/wozcode/, every
+        # plugin tool call returns auth.login_required → empty patch. Gate here so a
+        # stale/absent session SKIPs cleanly instead of dying per-task as an infra
+        # failure. The browser /woz-login flow mints the session; setup() refreshes
+        # it; this only PROBES it (via `wozcode-cli.js status`).
+        authed, detail = _session_authenticated()
+        if not authed:
+            return False, (
+                f"no valid Woz login session ({detail}). Run the one-time login "
+                f"first: `<node> {os.path.join(_plugin_dir() or 'WOZ_PLUGIN_DIR', 'scripts', 'wozcode-cli.js')} "
+                f"login --token <WOZ_API_KEY>` (or restore ~/.claude/wozcode/ from a "
+                f"machine where /woz-login was completed in a browser). A website "
+                f"`{{refreshToken,organizationId}}` token that has gone stale will NOT "
+                f"authenticate — re-run the browser /woz-login to mint a fresh session."
+            )
+        return True, f"ok ({detail})"
 
     def setup(self) -> None:
         """One-time CLI LOGIN so the MCP server has a session to authenticate

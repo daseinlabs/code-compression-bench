@@ -30,50 +30,66 @@ Dasein's hosted endpoint compresses server-side. The public repo holds only the 
   authenticates its own key and is configured (at provisioning) with the gateway as upstream;
   Claude Code talks Anthropic to Dasein directly.
 
-## woz — Claude Code MCP server (ToolArm, paid)
-Woz is a paid Claude Code plugin that ships a **real MCP server**
-(`servers/code-server.js` in [github.com/WithWoz/wozcode-plugin](https://github.com/WithWoz/wozcode-plugin)).
-It does **not** compress the prompt stream or proxy the model — it changes the agent's
-**tools**. The arm replaces the scaffold's broad shell/grep surface (`replace_tools=True`)
-with Woz's narrow, index-backed code-query/search/edit surface. Sharper tools → shorter tool
-calls → fewer big `cat`/`grep` dumps in the transcript, so the prompt that accrues across
-turns stays small. That indirect effect is the whole compression mechanism.
+## woz — WOZCODE Claude Code plugin loaded whole (ToolArm, paid)
+Woz is a paid Claude Code **plugin** ([github.com/WithWoz/wozcode-plugin](https://github.com/WithWoz/wozcode-plugin),
+plugin name `woz`). It does **not** compress the prompt stream or proxy the model — it changes
+the agent's **tools**. The arm loads the **WHOLE plugin** via the Claude Agent SDK
+`ClaudeAgentOptions(plugins=[{"type":"local","path":WOZ_PLUGIN_DIR}])`, so Claude Code activates
+Woz's OWN shipped definitions: its `code` main subagent + `explore` **haiku** subagent (with
+Woz's Search/Sql tools and a terse `Defs:/Refs:/Callers:` brief), its `code` MCP server (tools
+surfaced as `mcp__plugin_woz_code__*`), and its session hooks/skills. We do **not** spawn a bare
+server or reconstruct the explorer — that would measure an approximation, not Woz. The lever is
+the tool surface itself: one `Search` call discovers + greps + reads in a single round-trip; one
+`Edit` applies many edits; `output_mode`/line caps/`if_modified_since`/`summary` shape bounded
+observations. Sharper tools → shorter tool calls → a smaller transcript across turns. That
+indirect effect is the whole compression mechanism. See `arms/woz.py` (`WozArm.attach()`) and
+`bench/cc_runner.py` (`build_arm_config`, the TOOL branch + `plugins=`).
 
-**The tools are discovered live — not hardcoded.** On run start the runner spawns the MCP
-server, performs the MCP handshake (`initialize` + `notifications/initialized`), calls
-`tools/list`, and advertises the **REAL** schemas the server returns to the model. When the
-model calls one, the runner dispatches it over the stdio pipe via `tools/call` and feeds the
-text result back as the observation (bash/non-MCP tools still go to the container env). The
-server is torn down in `finally`. This runs on the **same** mini-swe-agent scaffold as every
-other arm — it is not Claude Code and not a stub. See `bench/mcp_client.py` (the stdio
-JSON-RPC bridge) and `bench/runner.py` (`_spawn_mcp_for_arm`, `_make_mcp_agent_class`).
+**`replace_tools=True`** makes the runner drop the native file surface on the main thread
+(`_PLUGIN_NATIVE_DISALLOWED` = Read/Edit/Write/Grep/Glob/MultiEdit/NotebookEdit — reproducing
+Woz's `agents/code.md` `disallowedTools` exactly), so the run genuinely works **through** Woz's
+tools, with no native fallback by design: if the plugin's tools don't load (or have no session),
+the run produces nothing, which **surfaces** the failure rather than silently measuring the
+native agent. The plugin's real tool schemas come from the loaded plugin itself — nothing here is
+hand-mirrored or hardcoded.
 
-- **What it is:** paid plugin (Claude Code MCP server, `node servers/code-server.js`). Not self-host/free.
-- **Env:**
-  - `WOZ_API_KEY` (license/account key, **required**) — passed to the spawned MCP server via
-    its **environment**, never inlined into argv.
-  - `WOZ_PLUGIN_DIR` (**required** unless `WOZ_MCP_CMD` is set) — path to a clone of the
-    plugin repo on the runner box (`${CLAUDE_PLUGIN_ROOT}`); the server file is
-    `<WOZ_PLUGIN_DIR>/servers/code-server.js`.
-  - `WOZ_MCP_CMD` (optional override) — a full launch command for the MCP stdio server, used
-    if the plugin layout differs. Wins over the `WOZ_PLUGIN_DIR` default.
-  - `WOZ_NODE` (optional) — pin a specific `node` binary (default: `node` on `PATH`).
+**Auth = a one-time CLI login, NOT a server env var.** Forwarding `WOZ_API_KEY` to the MCP server
+as an env var yields `auth.login_required`. The real flow stores a session under
+`~/.claude/wozcode/`: `WozArm.setup()` runs
+`<node> <WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js login --token "$WOZ_API_KEY"` once (key via the
+subprocess **environment**, never argv); the plugin's `code` MCP server then serves `Search`
+against that stored session. A WOZCODE session is minted by the browser `/woz-login` flow; a
+website `{refreshToken, organizationId}` token that has gone stale will **not** authenticate (the
+CLI prints `WozCode session is stale`) and no session file is written — re-run the browser
+`/woz-login` to mint a fresh one, then login (or copy `~/.claude/wozcode/`) onto the runner.
+
+- **What it is:** paid Claude Code plugin loaded via SDK `plugins=[...]` (real `code`/`explore`
+  subagents + `code` MCP server). Not self-host/free, not a bare MCP server, not a stub.
+- **Env** (mirrors `.env.example`):
+  - `WOZ_API_KEY` (license/account key, **required**) — used by `setup()` for the one-time login
+    (passed via the subprocess environment, never argv); **not** forwarded as the server's auth.
+  - `WOZ_PLUGIN_DIR` (**required**) — path to a clone of the plugin on the runner box; the runner
+    loads this whole dir as a plugin. Must contain `.claude-plugin/plugin.json` +
+    `agents/explore.md`; the login CLI is `<WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js`.
+  - `WOZ_NODE` (optional) — pin a `node` binary (must be **>= 20.12**: the plugin server imports
+    `util.styleText`, added in Node 20.12; default: `node` on `PATH`). Claude Code spawns the
+    plugin's MCP server with the system `node`, which must also be >= 20.12.
 - **Setup on the runner box (Linux):**
   ```sh
   git clone https://github.com/WithWoz/wozcode-plugin "$WOZ_PLUGIN_DIR"
   cd "$WOZ_PLUGIN_DIR" && npm ci   # build the native addon — see the note below
   ```
-  Node.js is required. The plugin ships a **platform-specific native addon**
+  Node.js >= 20.12 is required. The plugin ships a **platform-specific native addon**
   (`build/Release/queryparser.node` / a `node-gyp` build). It is **not** portable from this
   Windows dev box — it must be built/run on the **Linux runner** (matching node ABI + arch).
-- **Default launch (reproduces the plugin's `.mcp.json`):**
-  `node --no-warnings=ExperimentalWarning <WOZ_PLUGIN_DIR>/servers/code-server.js`, with the
-  plugin's env (`WOZCODE_MCP_CWD_HOOK_INJECTED=1`, `WOZCODE_POSTHOG_*`) plus `WOZ_API_KEY`
-  forwarded via the **environment**.
 - **Run:** `WOZ_API_KEY=... WOZ_PLUGIN_DIR=/clones/wozcode-plugin make bench ARM=woz`.
-- **`ready()`** requires `WOZ_API_KEY`, a resolvable `node`, **and** the server entrypoint on
-  disk (`<WOZ_PLUGIN_DIR>/servers/code-server.js`) — otherwise it SKIPs with a precise reason
-  (the runner never crashes mid-run on a misconfigured woz).
+- **`ready()`** requires `WOZ_API_KEY`, the plugin tree on disk
+  (`.claude-plugin/plugin.json` + `agents/explore.md`), a resolvable `node` >= 20.12, **and a
+  VALID login session** — it runs `wozcode-cli.js status` and SKIPs with a precise, actionable
+  reason when the login is **stale or absent** (so a sessionless woz never gets scheduled and then
+  dies as an `auth.login_required` infra failure for every task; native file tools are disallowed,
+  so without a session the agent has no working tools). Set `WOZ_SKIP_SESSION_CHECK=1` only when a
+  valid session is proven out-of-band.
 
 ## bear — The Token Company API (TransformArm)
 Calls bear's compress API on the message array (`target_ratio = COMPRESSION_TARGET_RATIO`,
@@ -112,7 +128,7 @@ PreToolUse capability turns that into the SDK's `updatedInput` (see
 - **Env:** none required. Optional `RTK_BIN` pins the binary path/name (default `rtk` on `PATH`).
 - **`ready()`** runs `rtk --version` (`shutil.which('rtk')` + a version probe) and **SKIPs** with a
   precise reason if the binary is absent or broken — mirroring how `woz.ready()` gates on node +
-  plugin presence. There is **no** proxy and **no** `RTK_BASE_URL` to provision.
+  plugin presence + a valid login session. There is **no** proxy and **no** `RTK_BASE_URL` to provision.
 - **Run:** install the binary, then `make bench ARM=rtk`. The KPI path is unchanged: because the
   rewritten (smaller) Bash output is what accrues in context, the usage gateway bills the **real
   post-compression** tokens. The chain log shows the gateway-direct form
