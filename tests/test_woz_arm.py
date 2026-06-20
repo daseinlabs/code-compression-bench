@@ -86,39 +86,48 @@ def _make_plugin_tree(root: Path) -> Path:
 def _fake_node(status_stdout: str = "Logged in as nick@example.com",
                status_rc: int = 0, version: str = "v22.23.0",
                login_stdout: str = "Authenticated as nick@example.com",
-               login_rc: int = 0):
+               login_rc: int = 0, login_tail_lines: int = 0):
     """Put a fake ``node`` on disk that:
       - prints ``version`` for ``--version`` (exit 0),
       - prints ``status_stdout`` and exits ``status_rc`` for the ``status`` subcmd,
-      - prints ``login_stdout`` and exits ``login_rc`` for the ``login`` subcmd,
+      - prints ``login_stdout`` (then ``login_tail_lines`` filler "stack" lines) and
+        exits ``login_rc`` for the ``login`` subcmd,
       - exits 0 otherwise.
-    The ``login`` branch lets us exercise ``setup()`` against deterministic CLI
-    behaviour (success / stale-token / generic failure). Yields the fake node path
-    (to set WOZ_NODE). Works on POSIX + Windows.
+    ``login_tail_lines`` reproduces the LIVE failure shape: the real CLI prints the
+    reason on line 1 then a long JS stack trace, so a classifier that looks only at
+    a fixed-size TAIL of the combined output would slice the marker off. Setting
+    ``login_tail_lines`` high (each line ~50 chars, so >8 lines overflows a 400-char
+    tail) lets us prove setup() classifies on the HEAD/full blob, not the tail.
+    Yields the fake node path (to set WOZ_NODE). Works on POSIX + Windows.
     """
     d = Path(tempfile.mkdtemp(prefix="woz_node_"))
+    # A representative stack frame ~50 chars; repeated ``login_tail_lines`` times
+    # after the reason line to mimic the real multi-frame trace.
+    _frame = "    at process.processTicksAndRejections (node:abc:1)"
     if os.name == "nt":
         node = d / "node.cmd"
         # %* is the full arg string; crude but sufficient (we only branch on tokens).
         # NB: check ``login`` BEFORE ``status`` is irrelevant (disjoint tokens), but
         # the login branch must come before the catch-all exit.
+        tail_echo = "".join(f"echo {_frame} & " for _ in range(login_tail_lines))
         node.write_text(
             "@echo off\r\n"
             f'echo %* | findstr /C:"--version" >nul && (echo {version} & exit /b 0)\r\n'
             f'echo %* | findstr /C:"status" >nul && (echo {status_stdout} & exit /b {status_rc})\r\n'
-            f'echo %* | findstr /C:"login" >nul && (echo {login_stdout} & exit /b {login_rc})\r\n'
+            f'echo %* | findstr /C:"login" >nul && (echo {login_stdout} & {tail_echo}exit /b {login_rc})\r\n'
             "exit /b 0\r\n",
             encoding="utf-8",
         )
     else:
         node = d / "node"
+        tail_echo = "".join(f'      echo "{_frame}";\n' for _ in range(login_tail_lines))
         node.write_text(
             "#!/bin/sh\n"
             'for a in "$@"; do\n'
             f'  case "$a" in\n'
             f'    --version) echo "{version}"; exit 0;;\n'
             f'    status) echo "{status_stdout}"; exit {status_rc};;\n'
-            f'    login) echo "{login_stdout}"; exit {login_rc};;\n'
+            f'    login) echo "{login_stdout}";\n{tail_echo}      exit {login_rc};;\n'
             "  esac\n"
             "done\n"
             "exit 0\n",
@@ -257,6 +266,37 @@ def test_setup_raises_stale_session_error_on_stale_token():
     msg = str(raised).lower()
     assert "stale" in msg and "/woz-login" in msg
     assert "self-heal" in msg  # tells the operator setup() can't recover it
+
+
+def test_setup_classifies_stale_when_marker_is_above_a_long_stack_trace():
+    """REGRESSION for the audit MINOR bug: the live CLI prints
+    'Error: WozCode session is stale. Please log in again using /woz-login.' on the
+    FIRST line, then ~10 JS stack frames. setup() used to classify against a
+    fixed-size TAIL ([-400:]) of (stderr+stdout), which sliced the marker off when
+    the trailing stack overflowed 400 chars — so the stale branch never fired and
+    the operator got a generic WozLoginError instead of the actionable
+    WozStaleSessionError. With ~20 filler frames the marker is far above the
+    400-char tail; setup() must STILL classify it as stale (it now scans the full
+    blob / head, like ready()/_session_authenticated)."""
+    with tempfile.TemporaryDirectory() as td:
+        root = _make_plugin_tree(Path(td))
+        with _fake_node(
+            login_stdout="Error: WozCode session is stale. Please log in again using /woz-login.",
+            login_rc=1,
+            login_tail_lines=20,  # ~20*50 = 1000 chars of stack AFTER the marker
+        ) as node:
+            with _env(WOZ_API_KEY="stale_website_token",
+                      WOZ_PLUGIN_DIR=str(root), WOZ_NODE=node):
+                raised = None
+                try:
+                    WozArm().setup()
+                except WozLoginError as e:
+                    raised = e
+    # The whole point: classified as STALE despite the marker sitting above a long
+    # stack tail that a [-400:] slice would have dropped.
+    assert isinstance(raised, WozStaleSessionError), raised
+    msg = str(raised).lower()
+    assert "stale" in msg and "self-heal" in msg
 
 
 def test_setup_raises_generic_login_error_on_other_failure():

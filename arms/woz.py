@@ -458,9 +458,19 @@ class WozArm(ToolArm):
                 f"Check node ({node!r}) and the plugin CLI ({cli!r})."
             ) from e
         if proc.returncode != 0:
-            # NEVER echo the key. Surface stdout/stderr tails (CLI prints the
-            # authenticated identity on success / the reason on failure).
-            tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-400:]
+            # NEVER echo the key. Classify against the FULL combined output, then
+            # surface a bounded HEAD slice for the operator (CLI prints the reason on
+            # the FIRST line, then a long JS stack trace). Classifying on a [-400:]
+            # TAIL silently slices the marker off — the live CLI emits
+            # "Error: WozCode session is stale. Please log in again using /woz-login."
+            # as line 1 followed by ~10 stack frames, so a tail keeps only the frames
+            # and the stale branch would never fire. ready()/_session_authenticated
+            # already scan the full blob; mirror that here so setup() classifies the
+            # SAME way (the audit minor fix).
+            blob = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
+            low = blob.lower()
+            # Head slice for the human-readable message (the reason lives at the top).
+            head = blob[:400]
             # Distinguish the COMMON, UN-self-healable cause — a stale/revoked
             # website {refreshToken,organizationId} token — from a generic login
             # failure. The live CLI prints "WozCode session is stale. Please log in
@@ -468,19 +478,20 @@ class WozArm(ToolArm):
             # Raising WozStaleSessionError gives the operator the actionable cause
             # immediately; it still IS-A WozLoginError so the runner's
             # arm-setup-error -> RunInfraError mapping (fail-closed) is unchanged.
-            low = tail.lower()
             if any(m in low for m in _SESSION_FAIL_MARKERS):
                 raise WozStaleSessionError(
                     "Woz login could NOT establish a session: WOZ_API_KEY is a STALE "
                     "or server-revoked website {refreshToken,organizationId} token "
                     "and setup() cannot self-heal it. Mint a FRESH session via the "
-                    "browser /woz-login flow, then re-run `wozcode-cli.js login "
-                    "--token <fresh>` on the runner (or copy ~/.claude/wozcode/), and "
-                    f"update WOZ_API_KEY. CLI output tail: {tail!r}"
+                    "browser /woz-login flow (bridge the CLI's loopback callback port "
+                    "to the runner via an SSH local-port-forward), then re-run "
+                    "`wozcode-cli.js login` (no --token: re-running with the SAME stale "
+                    "token writes nothing) or copy ~/.claude/wozcode/ over, and update "
+                    f"WOZ_API_KEY. CLI output head: {head!r}"
                 )
             raise WozLoginError(
                 f"Woz login failed (exit {proc.returncode}). Check WOZ_API_KEY is a "
-                f"valid Woz account key. CLI output tail: {tail!r}"
+                f"valid Woz account key. CLI output head: {head!r}"
             )
         # Success: the CLI prints "Authenticated as <email>"; creds are now stored
         # under ~/.claude/wozcode/ and the MCP server will read them. (Best-effort
