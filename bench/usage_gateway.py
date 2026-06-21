@@ -387,6 +387,20 @@ def _anthropic_create_kwargs(body: dict, model: str) -> dict:
             continue  # already set above (always present)
         if body.get(k) is not None:
             kwargs[k] = body[k]
+    # Bound Claude Code housekeeping (session-title) calls: CC forces an output_config
+    # structured title that this Vertex org disallows (-> 400); stripped above, the
+    # unconstrained model can solve the task embedded in the title prompt and ramble to
+    # the 32000-tok cap. Cap to a title-sized budget (arm-neutral; shared gateway).
+    try:
+        _sv = body.get("system")
+        _st = _sv if isinstance(_sv, str) else json.dumps(_sv or "")
+        _stl = _st.lower()
+        if ("generate a concise" in _stl and "title" in _stl) or "main topic or goal of this coding session" in _stl:
+            _cap = int(os.environ.get("CCB_TITLEGEN_MAX_TOKENS", "256"))
+            if int(kwargs.get("max_tokens") or 0) > _cap:
+                kwargs["max_tokens"] = _cap
+    except Exception:
+        pass
     return kwargs
 
 
