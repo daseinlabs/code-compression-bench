@@ -1,0 +1,40 @@
+diff --git a/crates/gateway-core/src/backend/http.rs b/crates/gateway-core/src/backend/http.rs
+index c85ac3c..cad8b7c 100644
+--- a/crates/gateway-core/src/backend/http.rs
++++ b/crates/gateway-core/src/backend/http.rs
+@@ -39,9 +39,33 @@ impl ReqwestHttpClient {
+ impl HttpClient for ReqwestHttpClient {
+     async fn send(&self, req: Request<Body>) -> Result<Response<Body>> {
+         use crate::error::Error;
++        use futures::TryStreamExt as _;
+ 
+-        let req: reqwest::Request = req
+-            .map(|body| reqwest::Body::wrap_stream(body.into_data_stream()))
++        let (parts, body) = req.into_parts();
++
++        // Buffer the (already in-memory) request body into a single contiguous
++        // byte buffer before handing it to reqwest. The passthrough services
++        // construct the forwarded body via `Body::from(Vec<u8>)`, so it is fully
++        // resident; collecting it here costs nothing extra.
++        //
++        // We MUST NOT forward it as `reqwest::Body::wrap_stream(...)`: under
++        // reqwest 0.13 a stream-wrapped body is sent with
++        // `transfer-encoding: chunked` and no `content-length`, and the upstream
++        // receives ZERO bytes (the request body is silently dropped). That made
++        // the gateway/Vertex reject every forwarded request with
++        // "messages: at least one message is required". A buffered body sets a
++        // correct `content-length` and is transmitted reliably.
++        let mut buf: Vec<u8> = Vec::new();
++        let mut stream = body.into_data_stream();
++        while let Some(chunk) = stream
++            .try_next()
++            .await
++            .map_err(|e| Error::HttpClient(format!("Failed to read request body: {e}")))?
++        {
++            buf.extend_from_slice(&chunk);
++        }
++
++        let req: reqwest::Request = Request::from_parts(parts, reqwest::Body::from(buf))
+             .try_into()
+             .map_err(|e| Error::HttpClient(format!("Failed to convert request: {e}")))?;
+ 

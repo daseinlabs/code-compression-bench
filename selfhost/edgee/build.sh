@@ -28,10 +28,12 @@ EDGEE_COMMIT="${EDGEE_COMMIT:-402004f6bc472eb989b7a89d96cf919761b54c52}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH="$HERE/anthropic_upstream.patch"
+PATCH2="$HERE/forward_body_buffer.patch"
 FORK_DIR="${EDGEE_FORK_DIR:-$HERE/build/edgee-fork}"
 EDGEE_BIN_OUT="${EDGEE_BIN_OUT:-$HOME/.local/bin/edgee}"
 
 [ -f "$PATCH" ] || { echo "missing patch: $PATCH" >&2; exit 1; }
+[ -f "$PATCH2" ] || { echo "missing patch: $PATCH2" >&2; exit 1; }
 
 # Rust toolchain (rustup) — install non-interactively if absent.
 if ! command -v cargo >/dev/null 2>&1; then
@@ -50,6 +52,10 @@ git -C "$FORK_DIR" checkout --quiet "$EDGEE_COMMIT"
 echo "[edgee] apply patch: $(basename "$PATCH")" >&2
 git -C "$FORK_DIR" apply --check "$PATCH"
 git -C "$FORK_DIR" apply "$PATCH"
+
+echo "[edgee] apply patch: $(basename "$PATCH2")" >&2
+git -C "$FORK_DIR" apply --check "$PATCH2"
+git -C "$FORK_DIR" apply "$PATCH2"
 
 # edgee-cli is a binary-only crate (no lib target), so the unit tests live in the
 # binary and run WITHOUT --lib. `--bin edgee` scopes to the CLI binary's tests.
