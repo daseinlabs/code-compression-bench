@@ -420,6 +420,17 @@ class WozArm(ToolArm):
         the operator sees the actionable cause: setup() CANNOT self-heal a stale
         token — a human must re-mint a fresh session via the browser /woz-login.
         """
+        # If a VALID session is already stored under ~/.claude/wozcode/ (e.g. copied
+        # from a machine that is logged into WOZCODE), the MCP server authenticates
+        # against it directly — no need to re-mint from WOZ_API_KEY, which may be a
+        # stale/server-revoked short-lived website token that `login --token` cannot
+        # self-heal. Prefer the existing session.
+        ok, detail = _session_authenticated()
+        if ok:
+            print(f"[woz] existing valid session found; skipping login ({detail[:80]})",
+                  flush=True)
+            return
+
         api_key = os.environ.get("WOZ_API_KEY")
         if not api_key:
             # ready() already gates on this; defensive only.
