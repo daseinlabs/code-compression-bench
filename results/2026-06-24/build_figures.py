@@ -188,57 +188,53 @@ def fig_input():
          {a: A[a]["input_tokens"] / 1e6 for a in A}, lambda v: f"{v:,.0f}M",
          better="low", xlabel="input tokens (millions)")
 
-# ── 8. cost vs solve-rate scatter ───────────────────────────────────────────
+# ── 8. savings vs solve-rate scatter ────────────────────────────────────────
 def fig_scatter():
     fig = plt.figure(figsize=(11.4, 7.0))
     ax = fig.add_axes([0.115, 0.135, 0.83, 0.60])
-    pts = {a: (A[a]["solve_rate"], A[a]["cost_per_solved"]) for a in A}
+    # x = solve rate (%, right is better); y = cost savings vs baseline (%, up is better)
+    pts = {a: (A[a]["solve_rate"], -A[a]["vs_a0_cost_pct"]) for a in A}
     xs = [p[0] for p in pts.values()]; ys = [p[1] for p in pts.values()]
-    xlo, xhi = min(xs) - 3, max(xs) + 3
-    ylo, yhi = 0.5, max(ys) + 0.45
+    xlo, xhi = min(xs) - 3, max(xs) + 3.5
+    ylo, yhi = min(ys) - 12, max(ys) + 12
     ax.set_xlim(xlo, xhi); ax.set_ylim(ylo, yhi)
-    # A0 solve-rate reference (label parked in the empty lower band, right of the line)
-    a0x = pts["A0"][0]
-    ax.axvline(a0x, color=SLATE, ls=(0, (4, 4)), lw=1.2, zorder=1)
-    ax.text(a0x + 0.18, 1.18, "baseline\nsolve rate", va="center", ha="left",
-            color=SLATE, fontsize=10, linespacing=1.1)
-    # points — uniform marker size for every arm (neutrality); dasein stands out by
-    # colour + position + bold label, NOT by a larger dot. A0/woz share x=62, so each
-    # label is parked clear of the cluster and tied to its dot with a thin leader line.
-    # white halo under every point so the A0/woz pair (shared x=62) reads as two
-    # distinct markers rather than one fused blob.
+    # baseline = zero savings; above it is cheaper than no compression, below is costlier
+    ax.axhspan(0, yhi, color=HERO, alpha=0.05, zorder=0)
+    ax.axhspan(ylo, 0, color=BAD, alpha=0.05, zorder=0)
+    ax.axhline(0, color=SLATE_DK, ls=(0, (4, 4)), lw=1.3, zorder=1)
+    ax.text(xlo + 0.3, 1.5, "baseline (no compression)", va="bottom", ha="left", color=SLATE_DK, fontsize=10)
+    ax.text(0.015, 0.965, "cheaper than baseline", transform=ax.transAxes, color=HERO_DARK, fontsize=10.5, va="top")
+    ax.text(0.015, 0.035, "costlier than baseline", transform=ax.transAxes, color=BAD_DK, fontsize=10.5, va="bottom")
+    # white halo + uniform markers
     for a, (x, yv) in pts.items():
         ax.scatter([x], [yv], s=520, color="white", edgecolor="white", zorder=4.4)
     for a, (x, yv) in pts.items():
         big = a == "dasein"
         ax.scatter([x], [yv], s=300, color=COL[a], edgecolor=EDGE[a],
                    linewidth=2.2 if big else 1.3, zorder=5)
-    place = {  # dx, dy, ha, va, leader?  (A0/woz share x=62 → both parked to the right, split in y)
-        "dasein":   (0.0, -0.34, "center", "top",    False),
-        "headroom": (0.55, 0.17, "left",   "bottom", False),
-        "rtk":      (-0.5, 0.20, "right",  "bottom", False),
-        "A0":       (0.7,  0.34, "left",   "bottom", True),
-        "woz":      (0.7, -0.40, "left",   "top",    True),
+    place = {  # dx, dy, ha, va  (A0 y=0 and woz y≈+6 both at x=62 → split vertically)
+        "dasein":   (0.7, 0.0, "left", "center"),
+        "woz":      (0.7, 2.0, "left", "bottom"),
+        "A0":       (0.7, -2.0, "left", "top"),
+        "rtk":      (0.7, 0.0, "left", "center"),
+        "headroom": (0.7, 0.0, "left", "center"),
     }
-    for a, (dx, dy, ha, va, leader) in place.items():
+    for a, (dx, dy, ha, va) in place.items():
         x, yv = pts[a]; big = a == "dasein"
-        lx, ly = x + dx, yv + dy
-        if leader:
-            ax.annotate("", xy=(x, yv), xytext=(lx, ly),
-                        arrowprops=dict(arrowstyle="-", color="#aab4c4", lw=1.0), zorder=4)
-        ax.text(lx, ly, f"{LABEL[a].split('  ')[0]}  ${yv:.2f}",
+        slab = "0%" if abs(yv) < 0.5 else f"{yv:+.0f}%"
+        ax.text(x + dx, yv + dy, f"{LABEL[a].split('  ')[0]}  {slab}",
                 ha=ha, va=va, fontsize=13.5 if big else 12,
                 fontweight="bold" if big else "normal",
                 color=HERO_DARK if big else INK, zorder=6)
     ax.set_xlabel("solve rate  (% of matched tasks the grader passed)  → more is better", fontsize=12, color=INK_SOFT)
-    ax.set_ylabel("cost per solved task (USD)  ↓ cheaper is better", fontsize=12, color=INK_SOFT)
+    ax.set_ylabel("cost savings vs baseline (%)  ↑ more savings is better", fontsize=12, color=INK_SOFT)
     from matplotlib.ticker import FuncFormatter
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:.2f}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:+.0f}%"))
     ax.grid(True, color=GRID, linewidth=1, zorder=0); ax.set_axisbelow(True)
     frame(ax); ax.spines["left"].set_visible(True); ax.spines["left"].set_color("#cbd5e1")
-    titleblock(fig, "Cost per solved task versus solve rate",
-               "Each arm over the n=100 matched set. Lower is cheaper per solved task; further right solves more tasks. The dashed line marks the baseline solve rate.")
+    titleblock(fig, "Cost savings versus solve rate",
+               "Each arm over the n=100 matched set. Up is more cost savings versus the no-compression baseline; right is more tasks solved. The top-right corner is best.")
     footer(fig)
     fig.savefig(os.path.join(OUT, "8_cost_vs_success.png")); plt.close(fig)
 

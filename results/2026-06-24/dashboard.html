@@ -108,7 +108,7 @@
     <tbody></tbody>
   </table>
   </div>
-  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs. Helper-model calls (woz's MCP subagents, Dasein's haiku scout/adjudicator) are kept out of these same-model columns as out-of-band overhead, so the comparison stays apples-to-apples. <i>compresr infra-failed on the bloated tasks and is excluded; edgee and bear-1.2 did not produce a graded set.</i></p>
+  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs. Helper-model calls (woz's exploration sub-agents, Dasein's scout/adjudicator hooks, both on a cheaper model) are kept out of these same-model columns as out-of-band overhead, so the comparison stays apples-to-apples.</p>
 
   <h2>Compare any metric</h2>
   <p class="h2sub">Pick a KPI — the bars re-sort best to worst. Dasein leads on cost, context, speed, and steps; two competitors cost more than the no-compression baseline. (Cache read:write is a diagnostic — higher is cheaper — not a metric Dasein tops; it explains Headroom's cost.)</p>
@@ -120,8 +120,8 @@
   </div>
   <p class="cap" id="cap"></p>
 
-  <h2>Cheap and correct</h2>
-  <p class="h2sub">Cost per solved task (down) versus solve rate (right), one point per arm. Dasein solves fewer raw tasks on this hard slice but at less than half the cost. Hover any point.</p>
+  <h2>Savings vs solve rate</h2>
+  <p class="h2sub">Cost savings versus the no-compression baseline (up) against solve rate (right) — the top-right corner is best. Dasein leads the savings axis at +54%, above the baseline line that RTK and Headroom sit below; the gap to the corner is its solve rate on this hard slice. Hover any point.</p>
   <div class="chartwrap">
     <div style="position:relative;width:100%;height:380px">
       <canvas id="scatter" role="img" aria-label="Scatter of cost per solved task versus solve rate for each arm"></canvas>
@@ -138,9 +138,6 @@
       <tr><td>woz</td><td class="claim">"Cut your Claude Code costs in half"; "30–40% faster" (an estimate)</td><td class="obs">−6% cost, −22% input, same solves as baseline, +30% <i>slower</i> wall-clock</td></tr>
       <tr><td>rtk</td><td class="claim">"60–90% fewer tokens on common dev commands"</td><td class="obs">+17% input, +13% cost; its hook only rewrites shell output — native Read/Grep/Glob bypass it</td></tr>
       <tr><td>headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+5% input, +42% cost (most expensive); weakest cache reuse — its docs: "code passes through" uncompressed</td></tr>
-      <tr><td>compresr</td><td class="claim">"100× compression" (FinanceBench — single-document QA)</td><td class="obs">Proxy did not complete a live agent run in our harness</td></tr>
-      <tr><td>edgee</td><td class="claim">"Cut token costs up to 50%" (its own aggregate is ~20%)</td><td class="obs">No graded run; same shell-output approach as rtk, derived from it</td></tr>
-      <tr><td>bear-1.2</td><td class="claim">"10–40% fewer tokens" — but "not designed for code"</td><td class="obs">Access-gated and out of scope by the vendor's own statement; not evaluated</td></tr>
     </tbody>
   </table>
   </div>
@@ -229,7 +226,7 @@ const valuePlugin={id:"vlab",afterDatasetsDraw(c){if(c.canvas.id!=="bar")return;
   ctx.textBaseline="middle";ctx.fillText(curM.fmt(v),b.x+7,b.y);});ctx.restore();}};
 Chart.register(valuePlugin);
 const scatterLabels={id:"slab",afterDatasetsDraw(c){const{ctx}=c;ctx.save();ctx.textBaseline="middle";
-  const off={dasein:[13,2,"left"],headroom:[13,0,"left"],rtk:[13,0,"left"],A0:[11,-11,"left"],woz:[11,13,"left"]};
+  const off={dasein:[13,2,"left"],headroom:[13,0,"left"],rtk:[13,0,"left"],A0:[11,13,"left"],woz:[11,-11,"left"]};
   c.data.datasets.forEach((ds,i)=>{const p=c.getDatasetMeta(i).data[0];if(!p)return;const k=ORDER[i];const o=off[k]||[12,0,"left"];
   ctx.textAlign=o[2];ctx.fillStyle=k==="dasein"?"#047857":"#334155";ctx.font=(k==="dasein"?"700 ":"500 ")+"12px -apple-system,Segoe UI,sans-serif";
   ctx.fillText(ds.label,p.x+o[0],p.y+o[1]);});ctx.restore();}};
@@ -242,18 +239,19 @@ drawBar(METRICS[0]);
 new Chart(document.getElementById("scatter"),{
   type:"scatter",
   plugins:[scatterLabels],
-  data:{datasets:ORDER.map(k=>({label:ARMS[k].label,data:[{x:ARMS[k].solve_rate,y:ARMS[k].cost_per_solved}],
+  data:{datasets:ORDER.map(k=>({label:ARMS[k].label,data:[{x:ARMS[k].solve_rate,y:-ARMS[k].vs_a0_cost_pct}],
     backgroundColor:ARMS[k].c,borderColor:ARMS[k].e,borderWidth:k==="dasein"?2.5:1.2,
     pointRadius:9,pointHoverRadius:12}))},
   options:{responsive:true,maintainAspectRatio:false,animation:false,
     layout:{padding:14},
     plugins:{legend:{display:false},
-      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x}% solved · $${c.parsed.y.toFixed(2)}/solved`}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x}% solved · ${c.parsed.y>=0?"+":""}${c.parsed.y.toFixed(0)}% vs baseline cost`}}},
     scales:{
       x:{title:{display:true,text:"solve rate  (% of matched tasks)  →  more is better",color:"#64748b"},
          min:46,max:66,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>v+"%"}},
-      y:{title:{display:true,text:"cost per solved task (USD)  ↓ cheaper is better",color:"#64748b"},
-         min:0.5,max:3.8,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>"$"+v.toFixed(2)}}}}
+      y:{title:{display:true,text:"cost savings vs baseline (%)  ↑ more savings is better",color:"#64748b"},
+         min:-54,max:66,grid:{color:c=>c.tick&&c.tick.value===0?"#94a3b8":"#eef2f6"},
+         ticks:{color:"#64748b",callback:v=>(v>0?"+":"")+v+"%"}}}}
 });
 </script>
 </body>

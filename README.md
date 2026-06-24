@@ -106,17 +106,21 @@ expensive (+42%). Dasein's ratio (22.7) sits below the baseline's (40.4) for the
 carries far less cached context to begin with, so there is simply less cached prefix to re-read — fewer reads
 over a small, stable prefix, not more writes — and its bill still falls 54%.
 
-## Cost versus solve rate
+## Savings versus solve rate
 
 <p align="center">
-  <img src="results/2026-06-24/figures/8_cost_vs_success.png" width="760" alt="Cost per solved task versus solve rate; Dasein occupies the low-cost region.">
+  <img src="results/2026-06-24/figures/8_cost_vs_success.png" width="760" alt="Cost savings versus solve rate; Dasein leads the savings axis at +54%, above the baseline line that RTK and Headroom fall below.">
 </p>
 
-On this deliberately hard slice, Dasein solved 50/100 to the baseline's 62 — it trades a few solves for less
-than half the cost. That trade is exactly why the leaderboard ranks on cost per solved task rather than raw
-solve count: the cost-per-solved metric charges Dasein for the solves it gives up, and it still ranks first.
-Solve rates cluster between 50% and 62% across every arm, the baseline included; this is the long tail of
-SWE-bench Verified, chosen to stress context management, not a measure of whole-of-SWE-bench solve rate.
+Plotting cost savings (up) against solve rate (right) puts the best arm in the top-right corner. Dasein leads
+the savings axis outright at **+54%**, well clear of the baseline line that RTK (−13%) and Headroom (−42%)
+sit below. The one axis where it trails is solve rate: on this deliberately hard slice Dasein solved 50/100
+to the baseline's 62, trading a few solves for less than half the cost — which is why the leaderboard ranks
+on cost per solved task (the metric charges Dasein for the solves it gives up, and it still ranks first).
+Closing that solve-rate gap is the one move that would carry Dasein from the top-left into the top-right
+corner. Solve rates cluster between 50% and 62% across every arm, the baseline included; this is the long
+tail of SWE-bench Verified, chosen to stress context management, not a measure of whole-of-SWE-bench solve
+rate.
 
 ## Every measured value
 
