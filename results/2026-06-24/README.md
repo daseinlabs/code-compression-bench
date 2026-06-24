@@ -6,8 +6,8 @@ of [SWE-bench Verified](https://www.swebench.com/).** One fixed scaffold (headle
 to every arm. Only the compression layer changes, so any cost or quality difference is attributable to that
 layer and its serving implementation.
 
-> **▶ [Open the interactive dashboard](https://raw.githack.com/daseinlabs/code-compression-bench/master/results/2026-06-24/dashboard.html)** &nbsp;·&nbsp;
-> [Fact vs fiction](fact-vs-fiction.md) &nbsp;·&nbsp; [paired.csv](paired.csv) &nbsp;·&nbsp; [summary.json](summary.json) &nbsp;·&nbsp; the full narrative lives in the [repo README](../../README.md).
+> [Interactive dashboard](https://raw.githack.com/daseinlabs/code-compression-bench/master/results/2026-06-24/dashboard.html) &nbsp;·&nbsp;
+> [Vendor claims vs measured](../../FACT-VS-FICTION.md) &nbsp;·&nbsp; [paired.csv](paired.csv) &nbsp;·&nbsp; [summary.json](summary.json) &nbsp;·&nbsp; [repo README](../../README.md).
 
 _Run date: 2026-06-24 · matched set: **n=100** tasks every arm completed._
 
@@ -28,7 +28,7 @@ efficiency and correctness together. Lower is better.
 Headroom's 11.6 is the weakest by far — roughly half the reuse of the next arm — so it re-pays the
 cache-*write* rate more often, which is why it ends up the most expensive arm.
 _`compresr` infra-failed on the bloated tasks and is excluded; `edgee` and `bear-1.2` did not produce a graded
-set — see [fact-vs-fiction.md](fact-vs-fiction.md)._
+set — see [FACT-VS-FICTION.md](../../FACT-VS-FICTION.md)._
 
 ![Savings vs the no-compression baseline](figures/1_savings_vs_baseline.png)
 
