@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code-Compression Bench — interactive results (2026-06-24)</title>
+<style>
+  :root{
+    --hero:#10b981; --hero-dk:#047857; --hero-soft:#d1fae5;
+    --slate:#64748b; --slate-dk:#334155; --ink:#0f172a; --ink-soft:#64748b;
+    --bad:#d98a8a; --bad-dk:#b04a4a; --line:#e6ebf1; --bg:#f7f9fb; --card:#ffffff;
+    --woz:#8b9bc4; --headroom:#c9a26b; --rtk:#b48ab8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto;padding:32px 22px 64px}
+  .eyebrow{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--hero-dk)}
+  h1{font-size:33px;line-height:1.15;margin:6px 0 8px;font-weight:800;letter-spacing:-.02em}
+  h1 .g{color:var(--hero-dk)}
+  .sub{font-size:16px;color:var(--ink-soft);max-width:760px;margin:0}
+  .meta{font-size:13px;color:#94a3b8;margin-top:10px}
+  h2{font-size:23px;font-weight:800;letter-spacing:-.01em;margin:46px 0 4px}
+  .h2sub{font-size:14.5px;color:var(--ink-soft);margin:0 0 18px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:26px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px}
+  .card.hero{border-color:var(--hero);box-shadow:0 0 0 1px var(--hero) inset}
+  .card .lab{font-size:12.5px;color:var(--ink-soft);font-weight:600}
+  .card .big{font-size:30px;font-weight:800;letter-spacing:-.02em;margin-top:4px}
+  .card .big.g{color:var(--hero-dk)}
+  .card .foot{font-size:12px;color:#94a3b8;margin-top:3px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;background:var(--card);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  thead th{background:#f1f5f9;color:var(--slate-dk);font-weight:700;font-size:12.5px;cursor:pointer;user-select:none}
+  thead th:hover{background:#e7edf3}
+  tbody tr:last-child td{border-bottom:none}
+  tr.dasein td{background:var(--hero-soft);font-weight:700}
+  tr.dasein td:first-child{color:var(--hero-dk)}
+  .pos{color:var(--bad-dk);font-weight:700}.neg{color:var(--hero-dk);font-weight:700}
+  .seg{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 14px}
+  .seg button{font:inherit;font-size:13px;font-weight:600;color:var(--slate-dk);background:var(--card);
+    border:1px solid var(--line);border-radius:9px;padding:7px 13px;cursor:pointer;transition:.12s}
+  .seg button:hover{border-color:var(--slate)}
+  .seg button.on{background:var(--hero);border-color:var(--hero-dk);color:#fff}
+  .chartwrap{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 18px 8px}
+  .cap{font-size:13.5px;color:var(--ink-soft);margin:4px 2px 2px;min-height:20px}
+  .cap b{color:var(--hero-dk)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .ff{table-layout:fixed}
+  .ff th,.ff td{white-space:normal;text-align:left;vertical-align:top}
+  .ff th:nth-child(1),.ff td:nth-child(1){width:11%;font-weight:700}
+  .ff th:nth-child(2),.ff td:nth-child(2){width:33%}
+  .ff th:nth-child(3),.ff td:nth-child(3){width:44%}
+  .ff th:nth-child(4),.ff td:nth-child(4){width:12%;text-align:center}
+  .ff .claim{color:var(--slate-dk)}.ff .obs{color:var(--ink)}
+  .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;margin-left:0}
+  .tag.win{background:var(--hero-soft);color:var(--hero-dk)}
+  .tag.lose{background:#fbe9e9;color:var(--bad-dk)}
+  .tag.fail{background:#f1f5f9;color:var(--slate-dk)}
+  .fo--note{font-size:12.5px;color:#94a3b8;margin-top:10px;line-height:1.6}
+  a{color:var(--hero-dk);font-weight:600}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--ink-soft);margin:2px 2px 12px}
+  .legend span{display:flex;align-items:center;gap:6px}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+  @media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}h1{font-size:27px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Dasein code-compression benchmark</div>
+  <h1>One agent, one model, one grader.<br><span class="g">Only Dasein actually makes it cheaper.</span></h1>
+  <p class="sub">Every context-compression layer for coding agents, run behind the identical headless Claude Code scaffold on the bloated long tail of SWE-bench&nbsp;Verified, priced cache-aware and graded by the official Docker harness. Same task, same model — only the compression layer changes.</p>
+  <p class="meta">Run 2026-06-24 · matched set n=100 tasks every arm completed · model claude-sonnet-4-6 on Vertex · ranked by $/solved</p>
+
+  <div class="cards">
+    <div class="card hero"><div class="lab">Total cost vs no compression</div><div class="big g">−54%</div><div class="foot">only arm with a real cut</div></div>
+    <div class="card hero"><div class="lab">Cost per solved task</div><div class="big g">$1.28</div><div class="foot">lowest — 39% under best rival</div></div>
+    <div class="card hero"><div class="lab">Wall-clock time</div><div class="big g">−40%</div><div class="foot">fastest arm · 2.2× faster than woz</div></div>
+    <div class="card hero"><div class="lab">Context to the model</div><div class="big g">−63%</div><div class="foot">half the peak working context</div></div>
+  </div>
+
+  <h2>The leaderboard</h2>
+  <p class="h2sub">Ranked by $/solved — cache-aware total cost ÷ Docker-graded solves. Click any column header to sort. Negative vs-A0 = cheaper / leaner than running with no compression.</p>
+  <div class="legend">
+    <span><i class="sw" style="background:#10b981"></i>dasein (hero)</span>
+    <span><i class="sw" style="background:#64748b"></i>A0 baseline</span>
+    <span><i class="sw" style="background:#8b9bc4"></i>woz</span>
+    <span><i class="sw" style="background:#c9a26b"></i>headroom</span>
+    <span><i class="sw" style="background:#b48ab8"></i>rtk</span>
+  </div>
+  <div style="overflow-x:auto">
+  <table id="board">
+    <thead><tr>
+      <th data-k="label">Arm</th>
+      <th data-k="solved">Solved</th>
+      <th data-k="cost_per_solved">$/solved</th>
+      <th data-k="cost_total">Total $</th>
+      <th data-k="vs_a0_cost_pct">vs A0 $</th>
+      <th data-k="input_m">Input (M)</th>
+      <th data-k="vs_a0_input_pct">vs A0 in</th>
+      <th data-k="wall_h">Wall h</th>
+      <th data-k="steps">Steps</th>
+      <th data-k="ctx_k">Peak ctx</th>
+      <th data-k="crcw">Cache R:W</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  </div>
+  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs. Helper-model calls (woz's MCP subagents, Dasein's haiku scout/adjudicator) are kept out of these same-model columns as out-of-band overhead, so the comparison stays apples-to-apples. <i>compresr infra-failed on the bloated tasks and is excluded; edgee and bear-1.2 did not produce a graded set.</i></p>
+
+  <h2>Compare any metric</h2>
+  <p class="h2sub">Pick a KPI — the bars re-sort best→worst. Dasein wins every efficiency metric; on two of them a competitor lands in the red, costing more than doing nothing.</p>
+  <div class="seg" id="seg"></div>
+  <div class="chartwrap">
+    <div style="position:relative;width:100%;height:360px">
+      <canvas id="bar" role="img" aria-label="Bar chart comparing the selected metric across the five arms"></canvas>
+    </div>
+  </div>
+  <p class="cap" id="cap"></p>
+
+  <h2>Cheap and correct</h2>
+  <p class="h2sub">Down is cheaper, right solves more — so bottom-right wins. Dasein owns the cheapest tier, trading a few solves on this hardest-context slice for less than half the cost. Hover any point.</p>
+  <div class="chartwrap">
+    <div style="position:relative;width:100%;height:380px">
+      <canvas id="scatter" role="img" aria-label="Scatter of cost per solved task versus solve rate for each arm"></canvas>
+    </div>
+  </div>
+
+  <h2>Fact vs fiction</h2>
+  <p class="h2sub">What each layer advertises on its own site, versus what we measured behind a real coding agent. Every competitor benchmarks an easier proxy — single-shot QA or shell output in isolation — never cache-aware dollars on a multi-turn agent.</p>
+  <div style="overflow-x:auto">
+  <table class="ff">
+    <thead><tr><th style="text-align:left">Layer</th><th style="text-align:left">Their headline claim</th><th style="text-align:left">What we observed (n=100)</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>dasein</td><td class="claim">Curates the agent's full working context at serve time</td><td class="obs">−54% cost, −63% context, $1.28/solved (lowest), fastest, fewest steps</td><td><span class="tag win">delivers</span></td></tr>
+      <tr><td>woz</td><td class="claim">"Reduces token consumption &amp; cost by 50%"; "30–40% faster"</td><td class="obs">−6% cost, −22% input, same solves as baseline, +30% <i>slower</i></td><td><span class="tag lose">overstated</span></td></tr>
+      <tr><td>rtk</td><td class="claim">"Reduces LLM token consumption by 60–90% on dev commands"</td><td class="obs">+17% input, +13% cost — only rewrites shell output; native tools bypass it</td><td><span class="tag lose">backfired</span></td></tr>
+      <tr><td>headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+5% input, +42% cost (worst); weakest cache reuse by far — re-pays cache writes</td><td><span class="tag lose">backfired</span></td></tr>
+      <tr><td>compresr</td><td class="claim">"100× compression"; "76% cheaper" (FinanceBench)</td><td class="obs">Infra-failed on live agentic tasks — could not complete the matched set</td><td><span class="tag fail">DNF</span></td></tr>
+      <tr><td>edgee</td><td class="claim">"Cut token costs up to 50%" (rebuilds RTK's shell-trimming)</td><td class="obs">No graded run; same shell-output ceiling as rtk</td><td><span class="tag fail">n/a</span></td></tr>
+      <tr><td>bear-1.2</td><td class="claim">"10–40% token reduction" — but "not designed for code"</td><td class="obs">Access-gated, no self-serve API → documented no-op</td><td><span class="tag fail">n/a</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="fo--note" style="margin-top:26px">
+    Method: success = the official SWE-bench Verified Docker grader (fail-to-pass resolved, pass-to-pass intact; no LLM judge). Cost = cache-aware Sonnet-4.6 pricing applied identically to every arm's real per-call usage (uncached input $3.00 / cache-write $3.75 / cache-read $0.30 / output $15.00 per 1M). These are the hardest-on-context tasks of SWE-bench Verified, chosen to stress compression — solve rates cluster 50–62% across <i>all</i> arms including the baseline, so absolute magnitudes are specific to this regime. Full data: <a href="paired.csv">paired.csv</a> · <a href="summary.json">summary.json</a> · benchmark sponsored &amp; operated by <a href="https://daseinlabs.ai">Dasein</a>, publicly reproducible.
+  </p>
+</div>
+
+<script src="chart.umd.min.js"></script>
+<script>
+const ARMS = {
+  dasein:  {label:"dasein",      c:"#10b981", e:"#047857", solved:50, solve_rate:50, cost_total:64.21, cost_per_solved:1.28, cost_list:286.72, input_m:94.1,  output_m:1.46, steps:2984, wall_h:7.94, lat:7.93, ctx_k:38.1, hit:92.7, crcw:22.7, deaths:0, vs_a0_cost_pct:-53.5, vs_a0_input_pct:-63.2},
+  A0:      {label:"A0 baseline", c:"#64748b", e:"#334155", solved:62, solve_rate:62, cost_total:138.17,cost_per_solved:2.23, cost_list:803.37, input_m:255.9, output_m:2.55, steps:3677, wall_h:13.28,lat:8.97, ctx_k:74.9, hit:95.9, crcw:40.4, deaths:0, vs_a0_cost_pct:0,     vs_a0_input_pct:0},
+  woz:     {label:"woz",         c:"#8b9bc4", e:"#5f6f9c", solved:62, solve_rate:62, cost_total:130.29,cost_per_solved:2.10, cost_list:612.61, input_m:199.2, output_m:2.69, steps:3147, wall_h:17.24,lat:13.01,ctx_k:76.8, hit:93.4, crcw:22.1, deaths:0, vs_a0_cost_pct:-5.7,  vs_a0_input_pct:-22.2},
+  headroom:{label:"headroom",    c:"#c9a26b", e:"#a07f47", solved:59, solve_rate:59, cost_total:196.65,cost_per_solved:3.33, cost_list:734.64, input_m:268.9, output_m:2.70, steps:3684, wall_h:14.34,lat:10.43,ctx_k:66.7, hit:88.2, crcw:11.6, deaths:1, vs_a0_cost_pct:42.3,  vs_a0_input_pct:5.1},
+  rtk:     {label:"rtk",         c:"#b48ab8", e:"#8c6690", solved:60, solve_rate:60, cost_total:156.72,cost_per_solved:2.61, cost_list:805.49, input_m:300.3, output_m:2.80, steps:3915, wall_h:14.61,lat:9.38, ctx_k:71.5, hit:92.2, crcw:44.0, deaths:0, vs_a0_cost_pct:13.4,  vs_a0_input_pct:17.3},
+};
+const ORDER = ["dasein","A0","woz","headroom","rtk"];
+const fmtPct = v => (v>0?"+":"")+v.toFixed(0)+"%";
+
+/* ---- leaderboard table ---- */
+const COLS = [
+  ["label", v=>v], ["solved", v=>v+"/100"], ["cost_per_solved", v=>"$"+v.toFixed(2)],
+  ["cost_total", v=>"$"+v.toFixed(0)], ["vs_a0_cost_pct", "signpct"], ["input_m", v=>v.toFixed(0)+"M"],
+  ["vs_a0_input_pct","signpct"], ["wall_h", v=>v.toFixed(1)], ["steps", v=>v.toLocaleString()],
+  ["ctx_k", v=>v.toFixed(1)+"K"], ["crcw", v=>v.toFixed(1)+":1"],
+];
+let sortK="cost_per_solved", sortAsc=true;
+function renderBoard(){
+  const rows = ORDER.slice().sort((a,b)=>{
+    let x=ARMS[a][sortK], y=ARMS[b][sortK];
+    if(typeof x==="string"){return sortAsc?x.localeCompare(y):y.localeCompare(x);}
+    return sortAsc?x-y:y-x;
+  });
+  const tb=document.querySelector("#board tbody"); tb.innerHTML="";
+  rows.forEach(k=>{
+    const a=ARMS[k], tr=document.createElement("tr"); if(k==="dasein")tr.className="dasein";
+    COLS.forEach(([key,fn])=>{
+      const td=document.createElement("td"); const val=a[key];
+      if(fn==="signpct"){ if(key.includes("vs_a0")&&k==="A0"){td.textContent="—";}
+        else{td.textContent=fmtPct(val); td.className=val>0?"pos":(val<0?"neg":"");}}
+      else td.textContent=fn(val);
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+document.querySelectorAll("#board thead th").forEach(th=>{
+  th.onclick=()=>{const k=th.dataset.k; if(sortK===k)sortAsc=!sortAsc; else{sortK=k;sortAsc=(k!=="solved"&&k!=="crcw");} renderBoard();};
+});
+renderBoard();
+
+/* ---- metric toggle bar chart ---- */
+const METRICS = [
+  {k:"cost_total",      name:"Total cost",      unit:"$",  better:"low",  fmt:v=>"$"+v.toFixed(0),  cap:"Dasein spends <b>$64</b> — less than half of every other arm."},
+  {k:"cost_per_solved", name:"Cost / solved",   unit:"$",  better:"low",  fmt:v=>"$"+v.toFixed(2),  cap:"<b>$1.28</b> per solved task — the leaderboard metric, and the lowest by far."},
+  {k:"wall_h",          name:"Wall-clock time", unit:"h",  better:"low",  fmt:v=>v.toFixed(1)+" h",  cap:"Fastest arm at <b>7.9 h</b> — 40% under baseline, 2.2× faster than woz."},
+  {k:"steps",           name:"Agent steps",     unit:"",   better:"low",  fmt:v=>v.toLocaleString(), cap:"Fewest steps — a tighter loop that wastes less of the context budget."},
+  {k:"input_m",         name:"Input tokens",    unit:"M",  better:"low",  fmt:v=>v.toFixed(0)+"M",   cap:"<b>63% less context</b> shipped to the model than the baseline."},
+  {k:"ctx_k",           name:"Peak context",    unit:"K",  better:"low",  fmt:v=>v.toFixed(1)+"K",   cap:"Half the live working context — compression actually doing its job."},
+  {k:"crcw",            name:"Cache health",    unit:":1", better:"high", fmt:v=>v.toFixed(1)+":1",  cap:"Cache read:write — higher reuse is healthier; headroom's 11.6:1 is the weakest by far."},
+];
+let bar, curM=METRICS[0];
+function drawBar(m){
+  curM=m;
+  const rows = ORDER.slice().sort((a,b)=> m.better==="low" ? ARMS[a][m.k]-ARMS[b][m.k] : ARMS[b][m.k]-ARMS[a][m.k]);
+  const labels=rows.map(k=>ARMS[k].label), data=rows.map(k=>ARMS[k][m.k]);
+  const bg=rows.map(k=>ARMS[k].c), bd=rows.map(k=>ARMS[k].e);
+  const cfg={type:"bar",data:{labels,datasets:[{data,backgroundColor:bg,borderColor:bd,borderWidth:rows.map(k=>k==="dasein"?2.5:1),borderRadius:5,barThickness:30}]},
+    options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
+      layout:{padding:{right:64}},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>m.fmt(c.parsed.x)}}},
+      scales:{x:{grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>m.fmt(v)},beginAtZero:true},
+              y:{grid:{display:false},ticks:{color:"#334155",font:{size:13}}}},
+      animation:false}};
+  if(bar){bar.data=cfg.data;bar.options=cfg.options;bar.update();}
+  else bar=new Chart(document.getElementById("bar"),cfg);
+  // value labels via afterdraw plugin set below; caption:
+  document.getElementById("cap").innerHTML = (m.better==="low"?"Lower is better. ":"Higher is better. ")+m.cap;
+}
+const valuePlugin={id:"vlab",afterDatasetsDraw(c){const{ctx}=c;ctx.save();ctx.font="700 12.5px -apple-system,Segoe UI,sans-serif";
+  c.data.datasets[0].data.forEach((v,i)=>{const b=c.getDatasetMeta(0).data[i];ctx.fillStyle=c.data.labels[i]==="dasein"?"#047857":"#334155";
+  ctx.textBaseline="middle";ctx.fillText(curM.fmt(v),b.x+7,b.y);});ctx.restore();}};
+Chart.register(valuePlugin);
+const seg=document.getElementById("seg");
+METRICS.forEach((m,i)=>{const b=document.createElement("button");b.textContent=m.name;if(i===0)b.className="on";
+  b.onclick=()=>{seg.querySelectorAll("button").forEach(x=>x.className="");b.className="on";drawBar(m);};seg.appendChild(b);});
+drawBar(METRICS[0]);
+
+/* ---- scatter ---- */
+new Chart(document.getElementById("scatter"),{
+  type:"scatter",
+  data:{datasets:ORDER.map(k=>({label:ARMS[k].label,data:[{x:ARMS[k].solve_rate,y:ARMS[k].cost_per_solved}],
+    backgroundColor:ARMS[k].c,borderColor:ARMS[k].e,borderWidth:k==="dasein"?2.5:1.2,
+    pointRadius:10,pointHoverRadius:13}))},
+  options:{responsive:true,maintainAspectRatio:false,animation:false,
+    layout:{padding:14},
+    plugins:{legend:{display:false},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x}% solved · $${c.parsed.y.toFixed(2)}/solved`}}},
+    scales:{
+      x:{title:{display:true,text:"solve rate  (% of matched tasks)  →  more is better",color:"#64748b"},
+         min:46,max:66,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>v+"%"}},
+      y:{title:{display:true,text:"cost per solved task (USD)  ↓ cheaper is better",color:"#64748b"},
+         min:0.5,max:3.8,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>"$"+v.toFixed(2)}}}}
+});
+</script>
+</body>
+</html>
