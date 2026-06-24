@@ -14,7 +14,7 @@
 <h3 align="center">Dasein cuts ~54% of total cost vs no compression — the only arm that delivers a real cut.</h3>
 
 <p align="center">
-  <b>Latest run — <code>bloated-50</code>, n=89 matched tasks (2026-06-24).</b><br>
+  <b>Latest run — the bloated long tail of SWE-bench Verified · n=89 matched tasks (2026-06-24).</b><br>
   −54% cost · −63% input · <b>$1.30 / solved task</b> (lowest of any arm) · cache 23:1.<br>
   The best competing layer shaves just ~10%; the rest cost <i>more</i> than running with no compression at all.<br>
   <a href="results/2026-06-24/">Full leaderboard, figures &amp; method →</a>
@@ -45,11 +45,12 @@ Each compression product plugs in through its **native interface** (proxy / API 
 reimplement anyone's method. The grader doesn't care how a patch was produced, which is exactly what makes
 the comparison fair.
 
-## The task set — `bloated-50`
+## The task set — the bloated long tail
 
-The 50 highest-token, longest-context instances of the held-out SWE-bench Verified 200 (`tasks_bloated50.json`).
-These are the runs where context management actually matters — long tool-output trails, repeated file reads,
-deep call stacks — i.e. the regime that separates a real compression layer from a no-op.
+The context-bloated long tail of SWE-bench Verified — long tool-output trails, repeated file reads, deep
+call stacks — i.e. the regime that separates a real compression layer from a no-op. The latest run covers
+**100 instances**, of which **n=89** were completed by every arm and form the matched leaderboard; the exact
+instances are listed in [`results/2026-06-24/paired.csv`](results/2026-06-24/paired.csv).
 
 ## Arms
 
@@ -111,7 +112,7 @@ rtk             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway �
 ## Leaderboard
 
 <!-- BENCH:START -->
-**Latest published run — `bloated-50`, n=89 matched tasks (2026-06-24).** Ranked by `$/solved` (cache-aware
+**Latest published run — the bloated long tail of SWE-bench Verified, n=89 matched tasks (2026-06-24).** Ranked by `$/solved` (cache-aware
 cost ÷ Docker-graded solves). Full figures, method, and honest caveats:
 [`results/2026-06-24/`](results/2026-06-24/).
 
@@ -124,11 +125,10 @@ cost ÷ Docker-graded solves). Full figures, method, and honest caveats:
 | headroom | 52/89 | $3.44 | $178.90 | +41% | +2% | 11:1 |
 
 Dasein is the only arm that meaningfully cuts cost vs the no-compression baseline: woz shaves ~10%, while
-rtk and headroom cost **more** than doing nothing. Dasein trades a few solves for the cut (45 vs the
-baseline's 54) but remains the cheapest per **solved** task by a wide margin. Helper-model calls (woz's MCP
-subagents, Dasein's haiku scout/adjudicator) are kept out-of-band overhead — never blended into these
-same-model columns — so the comparison stays apples-to-apples. _compresr infra-failed on the bloated tasks
-and is excluded._
+rtk and headroom cost **more** than doing nothing. It is the cheapest per **solved** task by a wide margin.
+Helper-model calls (woz's MCP subagents, Dasein's haiku scout/adjudicator) are kept out-of-band overhead —
+never blended into these same-model columns — so the comparison stays apples-to-apples. _compresr
+infra-failed on the bloated tasks and is excluded._
 <!-- BENCH:END -->
 
 ## Reproduce it
@@ -150,7 +150,7 @@ make selfhost-up            # edgee / headroom / compresr proxies (set their ups
 
 # 5. Smoke one task per arm, then the full set
 make smoke                  # 1 task per ready arm, end-to-end + grade
-make bench                  # the full bloated-50 across every ready arm (8 workers)
+make bench                  # the full bloated set across every ready arm (8 workers)
 
 # 6. Figures + leaderboard + README injection
 make report
