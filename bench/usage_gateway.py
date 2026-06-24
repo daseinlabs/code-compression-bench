@@ -741,22 +741,45 @@ def make_handler(upstream_base: str, sink: UsageSink,
             if betas:
                 kwargs["extra_headers"] = {"anthropic-beta": betas}
             client_wants_stream = bool(req_body.get("stream"))
-            # ROBUSTNESS: retry the WHOLE create+buffer on a TRANSIENT Vertex error.
-            # Iterating the stream is what avoids the SDK's "streaming required" guard;
-            # buffering the (type, data) pairs is fine — they're small and we need the
-            # full set for usage capture / non-stream reconstruction. Because nothing
-            # is relayed downstream until AFTER this buffer, a transient blip can be
-            # retried cleanly instead of breaking the run.
-            ev_dicts = None
+            # INCREMENTAL RELAY — the fix for silent-socket double-billing. The old code
+            # drained the ENTIRE Vertex stream into a list BEFORE relaying a single byte,
+            # so a 400-800s generation left the client's (Claude Code's) socket idle the
+            # whole time; its transport timed out, retried the WHOLE request, and the same
+            # generation got billed twice (the byte-identical out=64000 "twins"). Now we
+            # forward each SSE frame to the client AS Vertex produces it (socket stays warm
+            # -> no timeout -> no retry -> no double-bill), keeping a side copy of the
+            # events ONLY for usage capture. A transient-Vertex retry can fire only BEFORE
+            # the response headers go out (once bytes are on the wire we can't restart
+            # cleanly). The non-stream path keeps the old buffer-then-JSON behaviour.
+            ev_dicts: list = []
+            headers_sent = False
             last_err = None
             for attempt in range(_VERTEX_MAX_RETRIES + 1):
+                ev_dicts = []
                 try:
                     event_stream = _complete(kwargs)
-                    ev_dicts = [(_event_type(e), _event_data(e)) for e in event_stream]
+                    if client_wants_stream:
+                        for e in event_stream:
+                            t, d = _event_type(e), _event_data(e)
+                            ev_dicts.append((t, d))
+                            if not headers_sent:
+                                self.send_response(200)
+                                self.send_header("Content-Type", "text/event-stream")
+                                self.send_header("Cache-Control", "no-cache")
+                                self.end_headers()
+                                headers_sent = True
+                            try:
+                                self.wfile.write(_sse_event(t, d))
+                                self.wfile.flush()
+                            except (BrokenPipeError, ConnectionError):
+                                break  # client hung up — stop relaying, still log usage
+                    else:
+                        ev_dicts = [(_event_type(e), _event_data(e)) for e in event_stream]
                     break
                 except Exception as e:  # noqa: BLE001 — AnthropicVertex/upstream/ADC error
                     last_err = e
-                    if attempt < _VERTEX_MAX_RETRIES and _is_transient_vertex_error(e):
+                    # Only retry while nothing has been relayed yet (headers not sent).
+                    if not headers_sent and attempt < _VERTEX_MAX_RETRIES and _is_transient_vertex_error(e):
                         delay = _VERTEX_RETRY_BACKOFF[min(attempt, len(_VERTEX_RETRY_BACKOFF) - 1)]
                         print(f"  usage_gateway: transient Vertex error "
                               f"({type(e).__name__}: {str(e)[:120]}) — retry "
@@ -764,15 +787,15 @@ def make_handler(upstream_base: str, sink: UsageSink,
                         time.sleep(delay)
                         continue
                     break
-            if ev_dicts is None:
+            if not ev_dicts and not headers_sent:
                 self._gateway_error(502, f"vertex upstream error (after retries): "
                                     f"{type(last_err).__name__}: {str(last_err)[:200]}")
                 return
 
-            # Pre-build the verbatim SSE frames once; usage is parsed from the same
-            # frames (the cache split rides on message_start + message_delta).
-            frames = [_sse_event(t, d) for (t, d) in ev_dicts]
+            # Usage capture from the side copy of the events (cache split rides on
+            # message_start + message_delta) — same data, not used for relay.
             try:
+                frames = [_sse_event(t, d) for (t, d) in ev_dicts]
                 usage = usage_from_sse(b"".join(frames).decode("utf-8", "replace"))
                 row = extract_usage(usage, time.time() - t0)
                 if row is not None:
@@ -781,13 +804,13 @@ def make_handler(upstream_base: str, sink: UsageSink,
                 print(f"  usage_gateway WARN: vertex usage capture failed: "
                       f"{type(e).__name__}: {str(e)[:160]}", flush=True)
 
-            try:
-                if client_wants_stream:
-                    self._relay_frames_sse(frames)
-                else:
+            # Stream path already relayed incrementally above; only the non-stream path
+            # still needs to emit its accumulated JSON response here.
+            if not client_wants_stream:
+                try:
                     self._relay_anth_json(_accumulate_anthropic_message(ev_dicts, model))
-            except (BrokenPipeError, ConnectionError):
-                return  # client hung up — never crash
+                except (BrokenPipeError, ConnectionError):
+                    return  # client hung up — never crash
 
         def _relay_anth_json(self, anth: dict) -> None:
             data = json.dumps(anth).encode("utf-8")

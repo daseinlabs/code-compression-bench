@@ -11,6 +11,21 @@
 
 ---
 
+<h3 align="center">Dasein cuts ~54% of total cost vs no compression — the only arm that delivers a real cut.</h3>
+
+<p align="center">
+  <b>Latest run — <code>bloated-50</code>, n=89 matched tasks (2026-06-24).</b><br>
+  −54% cost · −63% input · <b>$1.30 / solved task</b> (lowest of any arm) · cache 23:1.<br>
+  The best competing layer shaves just ~10%; the rest cost <i>more</i> than running with no compression at all.<br>
+  <a href="results/2026-06-24/">Full leaderboard, figures &amp; method →</a>
+</p>
+
+<p align="center">
+  <img src="results/2026-06-24/figures/6_savings_vs_baseline.png" width="780" alt="Total cost vs the no-compression baseline — only Dasein lands meaningfully below it">
+</p>
+
+---
+
 ## Why this exists
 
 Every "we cut your tokens by N%" claim is measured on a different agent, a different task set, and a
@@ -96,8 +111,24 @@ rtk             Claude Code ──(ANTHROPIC_BASE_URL=gateway)──> gateway �
 ## Leaderboard
 
 <!-- BENCH:START -->
-_Results are regenerated on every run. Run the benchmark (below) to populate this section with the
-leaderboard table and figures, or see the latest published run under `results/`._
+**Latest published run — `bloated-50`, n=89 matched tasks (2026-06-24).** Ranked by `$/solved` (cache-aware
+cost ÷ Docker-graded solves). Full figures, method, and honest caveats:
+[`results/2026-06-24/`](results/2026-06-24/).
+
+| arm | solved | $/solved | total $ | vs A0 cost | vs A0 input | cache r:w |
+|---|---|---|---|---|---|---|
+| **Dasein** | 45/89 | **$1.30** | $58.70 | **−54%** | **−63%** | 23:1 |
+| woz | 54/89 | $2.12 | $114.34 | −10% | −29% | 20:1 |
+| A0 (baseline) | 54/89 | $2.35 | $126.92 | — | — | 40:1 |
+| rtk | 55/89 | $2.55 | $140.13 | +10% | +15% | 43:1 |
+| headroom | 52/89 | $3.44 | $178.90 | +41% | +2% | 11:1 |
+
+Dasein is the only arm that meaningfully cuts cost vs the no-compression baseline: woz shaves ~10%, while
+rtk and headroom cost **more** than doing nothing. Dasein trades a few solves for the cut (45 vs the
+baseline's 54) but remains the cheapest per **solved** task by a wide margin. Helper-model calls (woz's MCP
+subagents, Dasein's haiku scout/adjudicator) are kept out-of-band overhead — never blended into these
+same-model columns — so the comparison stays apples-to-apples. _compresr infra-failed on the bloated tasks
+and is excluded._
 <!-- BENCH:END -->
 
 ## Reproduce it

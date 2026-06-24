@@ -97,7 +97,7 @@ from bench.usage_gateway import (
 
 
 # ── defaults / caps (mirror bench.runner so ported A0/A3S rows share budgets) ─
-DEFAULT_WORKERS = 8
+DEFAULT_WORKERS = 10
 CALL_CAP = 100                # max agent turns per (task, arm) — ClaudeAgentOptions.max_turns.
                               # Matches the v5/mini_swe step_limit=100 so ported A0/A3S rows
                               # and live vendor arms share an identical turn budget.
@@ -105,7 +105,7 @@ WALL_CAP_S = 50 * 60          # hard wall-clock watchdog per solve (matches gate
 # Model id Claude Code SENDS on the wire (an Anthropic-shaped id). The gateway
 # ignores it and routes to the Vertex model below; it's just the label Claude Code
 # attaches and what we record on the RunRecord. Overridable via --model / MODEL.
-DEFAULT_MODEL = os.environ.get("MODEL", "claude-sonnet-4-5")
+DEFAULT_MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
 
 # The gateway is ALWAYS the bottom bridge to Vertex (claude-sonnet on Vertex via
 # litellm + ADC). These select the Vertex endpoint; auth is ADC on the box
@@ -523,6 +523,21 @@ async def _run_sdk(
     # Code uses the bearer path to the proxy/gateway, not a real Anthropic key.
     env["ANTHROPIC_AUTH_TOKEN"] = BRIDGE_AUTH_TOKEN
     env.pop("ANTHROPIC_API_KEY", None)
+    # Per-instance test environment: prepare_repos builds an isolated venv (exact/nearest
+    # Python + `pip install -e .` + the SWE-bench spec deps) at <repo_root>/.venvs/<iid>,
+    # a SIBLING of the worktree (cwd). Point the agent's PATH/VIRTUAL_ENV at it so
+    # `python`/`python3`/`pytest` resolve to the task's own toolchain. WITHOUT this the
+    # agent hits the host's mismatched global pytest, its test verification errors out, and
+    # it loops re-running tests (the call/cost explosion that hit every arm). No-op when the
+    # venv is absent (e.g. prepare_repos ran with --no-env), so other arms are unaffected.
+    _cwd_n = os.path.normpath(cwd)
+    _venv_dir = os.path.join(os.path.dirname(_cwd_n), ".venvs", os.path.basename(_cwd_n))
+    _venv_bin = os.path.join(_venv_dir, "bin")
+    if os.path.isdir(_venv_bin):
+        env["PATH"] = _venv_bin + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = _venv_dir
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
     env.update(env_overrides or {})
 
     has_plugins = bool(arm_cfg.plugins)
@@ -534,10 +549,12 @@ async def _run_sdk(
     # step0 injection -> a claude_code system-prompt PRESET with an `append`, so the
     # arm's brief/TOC lands at turn 0 and persists. Left None (stock prompt) when no
     # arm injects anything — baseline/proxy/woz are unaffected.
-    system_prompt = (
-        {"type": "preset", "preset": "claude_code", "append": sys_append}
-        if sys_append else None
-    )
+    # Cache isolation: tag the system block with this run's id so each run's cached
+    # prefix is byte-unique -> the per-org content-addressed prompt cache cannot be
+    # shared across arms/runs (no arm free-rides another's warm prefix). Constant
+    # within a run, so within-run prefix caching is unaffected.
+    sys_append = (sys_append or "") + ("\n<!-- ccbench-cache-iso:%s -->" % run_id)
+    system_prompt = {"type": "preset", "preset": "claude_code", "append": sys_append}
     options = ClaudeAgentOptions(
         allowed_tools=arm_cfg.allowed_tools,
         disallowed_tools=arm_cfg.disallowed_tools,
@@ -565,6 +582,10 @@ async def _run_sdk(
         # surface hook lifecycle events in the stream when EITHER a plugin ships its
         # own hooks OR an arm declared harness-level hooks (so they actually fire).
         include_hook_events=has_plugins or bool(sdk_hooks),
+        # Per-arm thinking override: some vendor proxies (compresr Context-Gateway) corrupt the
+        # extended-thinking signature on multi-turn replay. Env-gated so ONLY those runs disable
+        # thinking; default None = stock adaptive thinking for every other arm.
+        thinking=({"type": "disabled"} if os.environ.get("CCB_THINKING_DISABLED") == "1" else None),
     )
 
     messages: list[dict] = []
@@ -674,7 +695,14 @@ def _collect_result(result_msg, messages: list[dict]) -> dict:
 
 
 class RunInfraError(Exception):
-    """Raised on an infrastructure failure (SDK/model/network) — retried once."""
+    """Raised on an infrastructure failure (SDK/model/network) — retried once.
+
+    Carries ``usage`` — the gateway rows the wedged/failed solve DID generate before
+    it died — so the failure can be priced from real tokens instead of recorded as $0.
+    """
+    def __init__(self, msg: str, usage: Optional[list] = None):
+        super().__init__(msg)
+        self.usage = usage or []
 
 
 # ── patch capture (git diff of the working tree the agent edited) ─────────────
@@ -818,7 +846,22 @@ def run_agent(
     # be checked out on a path the SDK's cwd can reach. AC_REPO_ROOT/<iid> (or a
     # per-instance checkout) is the host path; this is a smoke-time wiring item on
     # the Linux box (see the report). Default to a per-instance dir under out_dir.
-    repo_dir = _resolve_repo_dir(instance_id, repo_root, out_dir)
+    repo_dir = _resolve_repo_dir(instance_id, repo_root, out_dir, arm_name=getattr(arm, "name", None))
+
+    # CLEAN START per (instance, arm): reset the worktree to base_commit BEFORE the agent runs.
+    # Without this, runs/arms ACCUMULATE edits on the shared worktree -> a later arm starts from a
+    # prior arm's fix (verify-only, not a real solve) AND the captured `git add -A && git diff`
+    # patch contains the prior arm's edits. Reset tracked files to HEAD (= base_commit) + drop
+    # untracked; gitignored build artifacts (*.egg-info) and the sibling per-instance venv are kept,
+    # so the editable install stays valid.
+    if os.path.isdir(os.path.join(repo_dir, ".git")) or os.path.isfile(os.path.join(repo_dir, ".git")):
+        try:
+            subprocess.run(["git", "-C", repo_dir, "reset", "--hard", "HEAD"],
+                           capture_output=True, text=True, timeout=120)
+            subprocess.run(["git", "-C", repo_dir, "clean", "-fd"],
+                           capture_output=True, text=True, timeout=120)
+        except Exception as _e:  # noqa: BLE001
+            print(f"  [warn] worktree reset failed for {instance_id}: {_e}", flush=True)
 
     instance = _fetch_instance(instance_id, dataset, split)
     prompt = _build_task_prompt(instance, instance_id, repo_dir)
@@ -853,6 +896,11 @@ def run_agent(
               f"Vertex ({VERTEX_MODEL})", flush=True)
     print(f"  gateway [{arm.name}]: CCB_GATEWAY_URL={gateway_base_url}", flush=True)
 
+    # accumulation guard: the SHARED gateway APPENDS to <tag>.usage.jsonl forever, so a
+    # reused run-id (re-run) or a retry leaves PRIOR conversations in the file. Record the
+    # row count NOW; after the solve, read ONLY the rows this attempt appended. Race-free
+    # (only this task writes this tag's file) + exact (no cache-pattern inference).
+    _usage_start = len(_read_usage_rows(gateway_usage_path))
     t0 = time.time()
     exit_status = "incomplete"
     raw: dict = {}
@@ -870,12 +918,19 @@ def run_agent(
         exit_status = "wall_cap"
         raw = raw or {}
     except Exception as e:  # noqa: BLE001 — surface infra faults to the worker (retried once)
+        # The wedged/orphaned solve still burned real tokens before it died; the gateway
+        # logged them. Capture them (same offset-slice as the success path) so the failure
+        # is priced from real usage, not recorded as a misleading $0.
+        try:
+            _failed_usage = _read_usage_rows(gateway_usage_path)[_usage_start:]
+        except Exception:
+            _failed_usage = []
         try:
             arm.teardown()
         except Exception:
             pass
         stop_gateway()
-        raise RunInfraError(f"{type(e).__name__}: {str(e)[:300]}") from e
+        raise RunInfraError(f"{type(e).__name__}: {str(e)[:300]}", usage=_failed_usage) from e
     finally:
         stop_gateway()
         try:
@@ -897,7 +952,7 @@ def run_agent(
     # the authoritative per-CALL usage series: the gateway JSONL rows (cache split).
     # For a SHARED gateway this is <CCB_GATEWAY_USAGE_DIR>/<run_id>.usage.jsonl; for
     # a per-run gateway it's the in-process gateway's path. Both isolate by run id.
-    usage = _read_usage_rows(gateway_usage_path)
+    usage = _read_usage_rows(gateway_usage_path)[_usage_start:]
 
     # write the native SDK trajectory dump (best-effort; never crash a paid run).
     if traj_path:
@@ -951,7 +1006,8 @@ def run_agent(
     }
 
 
-def _resolve_repo_dir(instance_id: str, repo_root: Optional[str], out_dir: str) -> str:
+def _resolve_repo_dir(instance_id: str, repo_root: Optional[str], out_dir: str,
+                      arm_name: Optional[str] = None) -> str:
     """The host path the agent's cwd points at for this instance's repo.
 
     Precedence: explicit --repo-root/<iid> if given; else AC_REPO_ROOT/<iid>; else
@@ -959,9 +1015,20 @@ def _resolve_repo_dir(instance_id: str, repo_root: Optional[str], out_dir: str) 
     cwd even when no repo is mounted — the patch will then be empty, surfacing the
     mount gap at smoke rather than crashing). Real repo provisioning (checkout or
     container mount) is a smoke-time item on the Linux box.
+
+    PER-ARM PARALLELISM: if a per-arm worktree ``<root>/<iid>__<arm>`` exists
+    (provisioned by ``prepare_repos --arms``), use it — so multiple arms can run the
+    SAME task concurrently without clobbering one shared tree. Falls back to the shared
+    ``<root>/<iid>`` (sequential-arm mode) when the per-arm tree isn't provisioned. The
+    matching per-arm venv is ``<root>/.venvs/<iid>__<arm>`` (the env PATH wiring derives
+    it from the worktree basename, so it follows automatically).
     """
     root = repo_root or os.environ.get("AC_REPO_ROOT")
     if root:
+        if arm_name:
+            per_arm = Path(root) / ("%s__%s" % (instance_id, arm_name))
+            if per_arm.exists():
+                return str(per_arm)
         return str(Path(root) / instance_id)
     d = Path(out_dir) / "repos" / instance_id
     d.mkdir(parents=True, exist_ok=True)
@@ -1097,17 +1164,26 @@ def _worker(job: tuple) -> dict:
 
         return run_record
     except RunInfraError as e:
-        return _infra_stub(instance_id, arm_name, model, str(e), t0)
+        return _infra_stub(instance_id, arm_name, model, str(e), t0, getattr(e, "usage", None))
     except Exception as e:  # noqa: BLE001 — worker must never crash the pool
         return _infra_stub(instance_id, arm_name, model,
                            f"{type(e).__name__}: {str(e)[:200]}", t0)
 
 
-def _infra_stub(instance_id: str, arm_name: str, model: str, err: str, t0: float) -> dict:
+def _infra_stub(instance_id: str, arm_name: str, model: str, err: str, t0: float,
+                usage: Optional[list] = None) -> dict:
+    # Price the failure from whatever the gateway actually logged (a wedged/orphaned
+    # solve still spent real tokens). Flagged infra_failed so it's excluded from success
+    # metrics, but no longer a misleading $0/calls=0 that hides a 89-min spiral.
+    usage = usage or []
+    it = sum((u.get("prompt_tokens", 0) or 0) for u in usage)
+    ot = sum((u.get("completion_tokens", 0) or 0) for u in usage)
+    cr = sum((u.get("cache_read_input_tokens", 0) or 0) for u in usage)
+    cw = sum((u.get("cache_creation_input_tokens", 0) or 0) for u in usage)
     return RunRecord(
         instance=instance_id, arm=arm_name, success=False, ftp=0.0,
-        input_tokens=0, output_tokens=0, cache_write_tok=0, cache_read_tok=0,
-        calls=0, wall_s=round(time.time() - t0, 1), cost_usd=0.0,
+        input_tokens=it, output_tokens=ot, cache_write_tok=cw, cache_read_tok=cr,
+        calls=len(usage), wall_s=round(time.time() - t0, 1), cost_usd=0.0,
         model=model, exit_status="infra_failed", infra_failed=True, error=err,
     ).to_json()
 
@@ -1191,7 +1267,7 @@ def main() -> None:
         pass
 
     ap = argparse.ArgumentParser(description="code-compression-bench Claude Code runner")
-    ap.add_argument("--tasks", default="tasks_bloated50.json", help="task-set JSON path")
+    ap.add_argument("--tasks", default="tasks_bloated100.json", help="task-set JSON path")
     ap.add_argument("--arms", default="baseline",
                     help="comma-separated arm names (default: baseline)")
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS)

@@ -31,3 +31,10 @@ selfhost/edgee/build/
 # OS
 .DS_Store
 Thumbs.db
+
+# session scratch + raw run outputs (not committed)
+*.bak*
+/runs/
+/runs_smoke/
+_cc_kpi.py
+_woz_live_capture.txt
