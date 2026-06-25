@@ -86,14 +86,16 @@
   <div style="overflow-x:auto">
   <table id="board">
     <thead><tr>
+      <th>#</th>
       <th data-k="label">Arm</th>
       <th data-k="solved">Solved</th>
       <th data-k="cost_per_solved">$/solved</th>
       <th data-k="cost_total">Total $</th>
-      <th data-k="vs_a0_cost_pct">vs A0 $</th>
+      <th data-k="vs_a0_cost_pct">vs base $</th>
       <th data-k="input_m">Input (M)</th>
-      <th data-k="vs_a0_input_pct">vs A0 in</th>
+      <th data-k="vs_a0_input_pct">vs base in</th>
       <th data-k="wall_h">Wall h</th>
+      <th data-k="vs_a0_time_pct">vs base time</th>
       <th data-k="steps">Steps</th>
       <th data-k="ctx_k">Peak ctx</th>
       <th data-k="crcw">Cache R:W</th>
@@ -138,18 +140,18 @@
   <p class="h2sub" style="margin-top:14px">Full sourced breakdown — every quote, primary source, the exact benchmark each number was measured on, and the mechanism behind each gap: <a href="../../FACT-VS-FICTION.md">FACT-VS-FICTION.md</a>.</p>
 
   <p class="fo--note" style="margin-top:26px">
-    Method: success = the official SWE-bench Verified Docker grader (fail-to-pass resolved, pass-to-pass intact; no LLM judge). Cost = cache-aware Sonnet-4.6 pricing applied identically to every arm's real per-call usage (uncached input $3.00 / cache-write $3.75 / cache-read $0.30 / output $15.00 per 1M). These are the hardest-on-context tasks of SWE-bench Verified, chosen to stress compression — solve rates cluster 50–62% across <i>all</i> arms including the baseline, so absolute magnitudes are specific to this regime. Full data: <a href="paired.csv">paired.csv</a> · <a href="summary.json">summary.json</a> · benchmark sponsored &amp; operated by <a href="https://daseinlabs.ai">Dasein</a>, publicly reproducible.
+    Method: success = the official SWE-bench Verified Docker grader (fail-to-pass resolved, pass-to-pass intact; no LLM judge). Cost = cache-aware Sonnet-4.6 pricing applied identically to every arm's real per-call usage (uncached input $3.00 / cache-write $3.75 / cache-read $0.30 / output $15.00 per 1M). Full data: <a href="paired.csv">paired.csv</a> · <a href="summary.json">summary.json</a> · benchmark sponsored &amp; operated by <a href="https://daseinlabs.ai">Dasein</a>, publicly reproducible.
   </p>
 </div>
 
 <script src="chart.umd.min.js"></script>
 <script>
 const ARMS = {
-  dasein:  {label:"dasein",      c:"#10b981", e:"#047857", solved:50, solve_rate:50, cost_total:64.21, cost_per_solved:1.28, cost_list:286.72, input_m:94.1,  output_m:1.46, steps:2984, wall_h:7.94, lat:7.93, ctx_k:38.1, hit:92.7, crcw:22.7, deaths:0, vs_a0_cost_pct:-53.5, vs_a0_input_pct:-63.2},
-  A0:      {label:"A0 baseline", c:"#64748b", e:"#334155", solved:62, solve_rate:62, cost_total:138.17,cost_per_solved:2.23, cost_list:803.37, input_m:255.9, output_m:2.55, steps:3677, wall_h:13.28,lat:8.97, ctx_k:74.9, hit:95.9, crcw:40.4, deaths:0, vs_a0_cost_pct:0,     vs_a0_input_pct:0},
-  woz:     {label:"woz",         c:"#8b9bc4", e:"#5f6f9c", solved:62, solve_rate:62, cost_total:130.29,cost_per_solved:2.10, cost_list:612.61, input_m:199.2, output_m:2.69, steps:3147, wall_h:17.24,lat:13.01,ctx_k:76.8, hit:93.4, crcw:22.1, deaths:0, vs_a0_cost_pct:-5.7,  vs_a0_input_pct:-22.2},
-  headroom:{label:"headroom",    c:"#c9a26b", e:"#a07f47", solved:59, solve_rate:59, cost_total:196.65,cost_per_solved:3.33, cost_list:734.64, input_m:268.9, output_m:2.70, steps:3684, wall_h:14.34,lat:10.43,ctx_k:66.7, hit:88.2, crcw:11.6, deaths:1, vs_a0_cost_pct:42.3,  vs_a0_input_pct:5.1},
-  rtk:     {label:"rtk",         c:"#b48ab8", e:"#8c6690", solved:60, solve_rate:60, cost_total:156.72,cost_per_solved:2.61, cost_list:805.49, input_m:300.3, output_m:2.80, steps:3915, wall_h:14.61,lat:9.38, ctx_k:71.5, hit:92.2, crcw:44.0, deaths:0, vs_a0_cost_pct:13.4,  vs_a0_input_pct:17.3},
+  dasein:  {label:"dasein",      c:"#10b981", e:"#047857", solved:50, solve_rate:50, cost_total:64.21, cost_per_solved:1.28, cost_list:286.72, input_m:94.1,  output_m:1.46, steps:2984, wall_h:7.94, lat:7.93, ctx_k:38.1, hit:92.7, crcw:22.7, deaths:0, vs_a0_cost_pct:-53.5, vs_a0_input_pct:-63.2, vs_a0_time_pct:-40.2},
+  A0:      {label:"A0 baseline", c:"#64748b", e:"#334155", solved:62, solve_rate:62, cost_total:138.17,cost_per_solved:2.23, cost_list:803.37, input_m:255.9, output_m:2.55, steps:3677, wall_h:13.28,lat:8.97, ctx_k:74.9, hit:95.9, crcw:40.4, deaths:0, vs_a0_cost_pct:0,     vs_a0_input_pct:0,     vs_a0_time_pct:0},
+  woz:     {label:"woz",         c:"#8b9bc4", e:"#5f6f9c", solved:62, solve_rate:62, cost_total:130.29,cost_per_solved:2.10, cost_list:612.61, input_m:199.2, output_m:2.69, steps:3147, wall_h:17.24,lat:13.01,ctx_k:76.8, hit:93.4, crcw:22.1, deaths:0, vs_a0_cost_pct:-5.7,  vs_a0_input_pct:-22.2, vs_a0_time_pct:29.8},
+  headroom:{label:"headroom",    c:"#c9a26b", e:"#a07f47", solved:59, solve_rate:59, cost_total:196.65,cost_per_solved:3.33, cost_list:734.64, input_m:268.9, output_m:2.70, steps:3684, wall_h:14.34,lat:10.43,ctx_k:66.7, hit:88.2, crcw:11.6, deaths:1, vs_a0_cost_pct:42.3,  vs_a0_input_pct:5.1,   vs_a0_time_pct:8.0},
+  rtk:     {label:"rtk",         c:"#b48ab8", e:"#8c6690", solved:60, solve_rate:60, cost_total:156.72,cost_per_solved:2.61, cost_list:805.49, input_m:300.3, output_m:2.80, steps:3915, wall_h:14.61,lat:9.38, ctx_k:71.5, hit:92.2, crcw:44.0, deaths:0, vs_a0_cost_pct:13.4,  vs_a0_input_pct:17.3,  vs_a0_time_pct:10.0},
 };
 const ORDER = ["dasein","A0","woz","headroom","rtk"];
 const fmtPct = v => (v>0?"+":"")+v.toFixed(0)+"%";
@@ -158,8 +160,8 @@ const fmtPct = v => (v>0?"+":"")+v.toFixed(0)+"%";
 const COLS = [
   ["label", v=>v], ["solved", v=>v+"/100"], ["cost_per_solved", v=>"$"+v.toFixed(2)],
   ["cost_total", v=>"$"+v.toFixed(0)], ["vs_a0_cost_pct", "signpct"], ["input_m", v=>v.toFixed(0)+"M"],
-  ["vs_a0_input_pct","signpct"], ["wall_h", v=>v.toFixed(1)], ["steps", v=>v.toLocaleString()],
-  ["ctx_k", v=>v.toFixed(1)+"K"], ["crcw", v=>v.toFixed(1)+":1"],
+  ["vs_a0_input_pct","signpct"], ["wall_h", v=>v.toFixed(1)], ["vs_a0_time_pct","signpct"],
+  ["steps", v=>v.toLocaleString()], ["ctx_k", v=>v.toFixed(1)+"K"], ["crcw", v=>v.toFixed(1)+":1"],
 ];
 let sortK="cost_per_solved", sortAsc=true;
 function renderBoard(){
@@ -169,8 +171,9 @@ function renderBoard(){
     return sortAsc?x-y:y-x;
   });
   const tb=document.querySelector("#board tbody"); tb.innerHTML="";
-  rows.forEach(k=>{
+  rows.forEach((k,i)=>{
     const a=ARMS[k], tr=document.createElement("tr"); if(k==="dasein")tr.className="dasein";
+    const rk=document.createElement("td"); rk.textContent=i+1; tr.appendChild(rk);
     COLS.forEach(([key,fn])=>{
       const td=document.createElement("td"); const val=a[key];
       if(fn==="signpct"){ if(key.includes("vs_a0")&&k==="A0"){td.textContent="—";}
@@ -182,7 +185,7 @@ function renderBoard(){
   });
 }
 document.querySelectorAll("#board thead th").forEach(th=>{
-  th.onclick=()=>{const k=th.dataset.k; if(sortK===k)sortAsc=!sortAsc; else{sortK=k;sortAsc=(k!=="solved"&&k!=="crcw");} renderBoard();};
+  th.onclick=()=>{const k=th.dataset.k; if(!k)return; if(sortK===k)sortAsc=!sortAsc; else{sortK=k;sortAsc=(k!=="solved"&&k!=="crcw");} renderBoard();};
 });
 renderBoard();
 
@@ -240,7 +243,7 @@ new Chart(document.getElementById("scatter"),{
     plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x}% solved · ${c.parsed.y>=0?"+":""}${c.parsed.y.toFixed(0)}% vs baseline cost`}}},
     scales:{
-      x:{title:{display:true,text:"solve rate  (% of matched tasks)  →  more is better",color:"#64748b"},
+      x:{title:{display:true,text:"solve rate  (% of tasks)  →  more is better",color:"#64748b"},
          min:46,max:66,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>v+"%"}},
       y:{title:{display:true,text:"cost savings vs baseline (%)  ↑ more savings is better",color:"#64748b"},
          min:-54,max:66,grid:{color:c=>c.tick&&c.tick.value===0?"#94a3b8":"#eef2f6"},

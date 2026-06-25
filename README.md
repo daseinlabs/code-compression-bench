@@ -34,13 +34,13 @@ coding team actually pays per result.
 
 ## Leaderboard
 
-| Arm | Solved | $ / solved | Total cost | vs baseline | Input tokens | vs baseline | Wall-clock | Cache R:W |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **Dasein** | 50 / 100 | **$1.28** | **$64.21** | **−54%** | **94.1M** | **−63%** | **7.9 h** | 22.7 |
-| Woz | 62 / 100 | $2.10 | $130.29 | −6% | 199.2M | −22% | 17.2 h | 22.1 |
-| Baseline (no compression) | 62 / 100 | $2.23 | $138.17 | — | 255.9M | — | 13.3 h | 40.4 |
-| RTK | 60 / 100 | $2.61 | $156.72 | +13% | 300.3M | +17% | 14.6 h | 44.0 |
-| Headroom | 59 / 100 | $3.33 | $196.65 | +42% | 268.9M | +5% | 14.3 h | 11.6 |
+| # | Arm | Solved | $ / solved | Total cost | vs base | Input | vs base | Wall-clock | vs base | Cache R:W |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | **Dasein** | 50 / 100 | **$1.28** | **$64.21** | **−54%** | **94.1M** | **−63%** | **7.9 h** | **−40%** | 22.7 |
+| 2 | Woz | 62 / 100 | $2.10 | $130.29 | −6% | 199.2M | −22% | 17.2 h | +30% | 22.1 |
+| 3 | Baseline (no compression) | 62 / 100 | $2.23 | $138.17 | — | 255.9M | — | 13.3 h | — | 40.4 |
+| 4 | RTK | 60 / 100 | $2.61 | $156.72 | +13% | 300.3M | +17% | 14.6 h | +10% | 44.0 |
+| 5 | Headroom | 59 / 100 | $3.33 | $196.65 | +42% | 268.9M | +5% | 14.3 h | +8% | 11.6 |
 
 Dasein runs the full task set for **$64.21**, less than half of every other arm, and turns in the lowest cost
 per solved task at **$1.28** — the next-cheapest arm (Woz) costs $2.10, 64% more per solved task. It is the
