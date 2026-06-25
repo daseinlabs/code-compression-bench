@@ -7,8 +7,8 @@ number was measured on; (3) what we observed when the same product ran behind a 
 controlled, cache-aware, outcome-graded benchmark; and (4) the mechanism that explains the gap.
 
 The controlled benchmark is described in the [README](README.md). In one line: one fixed scaffold (headless
-Claude Code), one model (`claude-sonnet-4-6` on Vertex), the bloated long tail of SWE-bench Verified, the
-official SWE-bench Docker grader, and one cache-aware Sonnet-4.6 price table applied identically to every
+Claude Code), one model (`claude-sonnet-4-6` on Vertex), 100 tasks from SWE-bench Verified, the official
+SWE-bench Docker grader, and one cache-aware Sonnet-4.6 price table applied identically to every
 arm. The matched set is the **n = 100** tasks every arm completed (run date 2026-06-24). Per-task data:
 [`results/2026-06-24/paired.csv`](results/2026-06-24/paired.csv).
 
@@ -78,8 +78,8 @@ model's context (hence −22% input), but it adds round-trips, and those round-t
 on long, hard tasks — which is why the arm that markets "30–40% faster" is in fact the slowest one here. On
 cache-aware pricing, where a re-read of a cached prefix is already cheap, trimming the *visible* prompt
 removes less dollar cost than it removes tokens, so a 22% token cut becomes a 6% bill cut. The "up to 50%
-cheaper / up to 10× faster" figures are favorable-case ceilings; on the hardest-context slice of SWE-bench
-Verified, priced on real usage, they do not appear.
+cheaper / up to 10× faster" figures are favorable-case ceilings; on these SWE-bench Verified tasks, priced
+on real usage, they do not appear.
 
 On quality: Woz's 80.2% TerminalBench result is legitimate, but it is measured on **Claude Opus 4.7**, a
 stronger model than the **Opus 4.6** of the "Claude Code" line it is plotted against — and stronger than the
@@ -322,8 +322,8 @@ This benchmark measures the one thing none of them do: **the cache-aware dollar 
 repository tasks, graded by the official SWE-bench Docker harness, with the agent, model, and price table
 held fixed for every arm.** Under that measurement the headlines do not reproduce. Two competitors (RTK,
 Headroom) cost more than running no compression at all; the best of the rest (Woz) shaves 6% while running
-30% slower. [Dasein](README.md), which curates the agent's full working context — the part that actually
-grows every turn — rather than one document, one tool's output, or one-shot QA, cut total cost 54% and the
+30% slower. [Dasein](README.md), which curates the agent's working context — the part that actually grows
+every turn — rather than one document, one tool's output, or one-shot QA, cut total cost 54% and the
 context delivered to the model 63%, at the lowest cost per solved task on the board.
 
 ---

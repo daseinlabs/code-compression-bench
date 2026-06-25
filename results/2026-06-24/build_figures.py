@@ -40,7 +40,7 @@ plt.rcParams.update({
     "figure.facecolor": "white", "axes.facecolor": "white", "savefig.facecolor": "white",
     "figure.dpi": 150, "savefig.dpi": 150,
 })
-FOOT = f"Code-Compression Bench   ·   matched set n={N}   ·   cache-aware Sonnet-4.6 pricing   ·   SWE-bench Verified (context-heavy long tail)"
+FOOT = f"Code-Compression Bench   ·   {N} tasks from SWE-bench Verified   ·   cache-aware Sonnet-4.6 pricing"
 
 def frame(ax):
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)

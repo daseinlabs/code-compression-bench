@@ -71,7 +71,7 @@
 <div class="wrap">
   <div class="eyebrow">Code-Compression Bench</div>
   <h1>Context-compression layers for coding agents, measured like for like.</h1>
-  <p class="sub">Every layer run behind the identical headless Claude Code scaffold on the context-heavy long tail of SWE-bench&nbsp;Verified, priced cache-aware and graded by the official Docker harness. One agent, one model, one grader — only the compression layer changes. With everything else fixed, Dasein was the only layer that reduced total cost.</p>
+  <p class="sub">Every layer run behind the identical headless Claude Code scaffold on 100 tasks from SWE-bench&nbsp;Verified, priced cache-aware and graded by the official Docker harness. One agent, one model, one grader — only the compression layer changes. With everything else fixed, Dasein was the only layer that reduced total cost.</p>
   <p class="meta">Run 2026-06-24 · matched set n=100 tasks every arm completed · model claude-sonnet-4-6 on Vertex · ranked by cost per solved task</p>
 
   <div class="cards">
@@ -108,7 +108,7 @@
     <tbody></tbody>
   </table>
   </div>
-  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs. Helper-model calls (woz's exploration sub-agents, Dasein's scout/adjudicator hooks, both on a cheaper model) are kept out of these same-model columns as out-of-band overhead, so the comparison stays apples-to-apples.</p>
+  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs. Where a layer routes some work to a different, cheaper model, those calls are kept out of these same-model columns as out-of-band overhead, so the comparison stays apples-to-apples.</p>
 
   <h2>Compare any metric</h2>
   <p class="h2sub">Pick a KPI — the bars re-sort best to worst. Dasein leads on cost, context, speed, and steps; two competitors cost more than the no-compression baseline. (Cache read:write is a diagnostic — higher is cheaper — not a metric Dasein tops; it explains Headroom's cost.)</p>
@@ -134,7 +134,7 @@
   <table class="ff">
     <thead><tr><th style="text-align:left">Layer</th><th style="text-align:left">Their headline claim</th><th style="text-align:left">What we observed (n=100)</th></tr></thead>
     <tbody>
-      <tr><td>dasein</td><td class="claim">Curates the agent's full working context at serve time</td><td class="obs">−54% cost, −63% input, $1.28/solved (lowest), fastest, fewest steps; solves 50/100 vs 62 baseline — wins on $/solved</td></tr>
+      <tr><td>dasein</td><td class="claim">Curates the agent's working context</td><td class="obs">−54% cost, −63% input, $1.28/solved (lowest), fastest, fewest steps; solves 50/100 vs 62 baseline — wins on $/solved</td></tr>
       <tr><td>woz</td><td class="claim">"Cut your Claude Code costs in half"; "30–40% faster" (an estimate)</td><td class="obs">−6% cost, −22% input, same solves as baseline, +30% <i>slower</i> wall-clock</td></tr>
       <tr><td>rtk</td><td class="claim">"60–90% fewer tokens on common dev commands"</td><td class="obs">+17% input, +13% cost; its hook only rewrites shell output — native Read/Grep/Glob bypass it</td></tr>
       <tr><td>headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+5% input, +42% cost (most expensive); weakest cache reuse — its docs: "code passes through" uncompressed</td></tr>
