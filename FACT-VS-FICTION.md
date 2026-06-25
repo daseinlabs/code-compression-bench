@@ -2,7 +2,7 @@
 
 Every product in this benchmark advertises a large reduction in tokens, cost, or latency. Most of those
 numbers are real — **on the benchmark the vendor chose**. The purpose of this document is to show, for each
-competitor: (1) exactly what they claim, with verbatim quotes and primary sources; (2) exactly what that
+layer: (1) exactly what they claim, with verbatim quotes and primary sources; (2) exactly what that
 number was measured on; (3) what we observed when the same product ran behind a real coding agent under a
 controlled, cache-aware, outcome-graded benchmark; and (4) the mechanism that explains the gap.
 
@@ -16,7 +16,7 @@ This is not an accusation of dishonesty. Several of these vendors disclose their
 and we quote those disclosures because they are the most important part of the story. The thesis is narrow
 and entirely evidence-based:
 
-> **No competitor's headline number is measured on what a coding team actually pays for** — the cache-aware
+> **No layer's headline number is measured on what a coding team actually pays for** — the cache-aware
 > dollar cost of solving real repository tasks with a real multi-turn agent. The numbers are measured on
 > single-shot question-answering, single-document QA, shell-command output in isolation, token counts with no
 > task-success check, or favorable-case "up to" ceilings. When you measure the real thing, the headlines do
@@ -38,7 +38,7 @@ and entirely evidence-based:
 | bear-1.2 | — | — | — | — | — | — | — |
 
 Compresr, Edgee, and bear-1.2 produced no graded result on the matched set; the reasons are specific to each
-and covered below. The remainder of this document takes the competitors one at a time, strongest first.
+and covered below. The remainder of this document takes the layers one at a time, strongest first.
 
 ---
 
@@ -48,7 +48,7 @@ and covered below. The remainder of this document takes the competitors one at a
 tools and routes read-only codebase exploration to a Haiku sub-agent. Integration: local plugin (not a
 proxy). Homepage: [wozcode.com](https://wozcode.com). YC W25.
 
-Woz is the strongest competitor in this benchmark and deserves to be treated as such. Its token reduction is
+Woz is the strongest of the other layers and deserves to be treated as such. Its token reduction is
 real, and unlike the others its flagship *quality* benchmark is a genuine multi-turn agentic harness, not
 single-shot QA. The gap between its marketing and our result is therefore not "they measured the wrong kind
 of thing" — it is narrower and more specific: the headline cost and speed numbers are favorable-case
@@ -226,7 +226,7 @@ could not complete a live agent run in our benchmark.
 Homepage: [edgee.ai](https://www.edgee.ai/). Notably, Edgee's compression engine is, by its own attribution,
 "initially based on" RTK.
 
-Edgee is the most candid competitor about its own scope, and that candor is the point.
+Edgee is the most candid of these layers about its own scope, and that candor is the point.
 
 ### Claims (verbatim, sourced)
 
@@ -256,7 +256,7 @@ cost-per-solved result — Edgee's benchmarks never check whether the agent stil
 produce a clean graded number for it on the matched set; on the evidence Edgee itself publishes, a
 50%-cheaper-while-solving claim is not supported.
 
-**Verdict.** The most transparent competitor: its own aggregate (~20%) undercuts its "up to 50%" headline,
+**Verdict.** The most transparent of the layers: its own aggregate (~20%) undercuts its "up to 50%" headline,
 its "lossless" claim is scoped to tool-output framing, and it never measures task success. Inherits RTK's
 shell-output ceiling.
 
@@ -305,7 +305,7 @@ non-compilable. Every benchmark is document QA; none is agentic coding. Out of s
 
 ## The pattern
 
-Line the six competitors up by what their headline number was actually measured on:
+Line the six layers up by what their headline number was actually measured on:
 
 - **Single-shot / single-document QA:** Headroom (GSM8K, TruthfulQA, SQuAD, BFCL), Compresr (FinanceBench),
   bear-1.2 (FinanceBench, SQuAD, CoQA, LongBench). None has a growing multi-turn context; none contains code
@@ -320,7 +320,7 @@ Line the six competitors up by what their headline number was actually measured 
 
 This benchmark measures the one thing none of them do: **the cache-aware dollar cost of solving real
 repository tasks, graded by the official SWE-bench Docker harness, with the agent, model, and price table
-held fixed for every arm.** Under that measurement the headlines do not reproduce. Two competitors (RTK,
+held fixed for every arm.** Under that measurement the headlines do not reproduce. Two layers (RTK,
 Headroom) cost more than running no compression at all; the best of the rest (Woz) shaves 6% while running
 30% slower. [Dasein](README.md), which curates the agent's working context — the part that actually grows
 every turn — rather than one document, one tool's output, or one-shot QA, cut total cost 54% and the
@@ -328,7 +328,7 @@ context delivered to the model 63%, at the lowest cost per solved task on the bo
 
 ---
 
-_All competitor quotes are verbatim from the cited primary sources, retrieved 2026-06-24. Our measured
+_All vendor quotes are verbatim from the cited primary sources, retrieved 2026-06-24. Our measured
 numbers are reproducible from [`results/2026-06-24/paired.csv`](results/2026-06-24/paired.csv) and
 [`summary.json`](results/2026-06-24/summary.json). Benchmark sponsored and operated by
 [Dasein](https://daseinlabs.ai); the methodology is identical for every arm, including Dasein's._

@@ -72,19 +72,12 @@
   <div class="eyebrow">Code-Compression Bench</div>
   <h1>Context-compression layers for coding agents, measured like for like.</h1>
   <p class="sub">Every layer run behind the identical headless Claude Code scaffold on 100 tasks from SWE-bench&nbsp;Verified, priced cache-aware and graded by the official Docker harness. One agent, one model, one grader — only the compression layer changes, so any difference in cost or quality is attributable to it.</p>
-  <p class="meta">Run 2026-06-24 · matched set n=100 tasks every arm completed · model claude-sonnet-4-6 on Vertex · ranked by cost per solved task</p>
+  <p class="meta">Run 2026-06-24 · 100 tasks from SWE-bench Verified · model claude-sonnet-4-6 · ranked by cost per solved task</p>
 
-  <div class="cards">
-    <div class="card hero"><div class="lab">Total cost vs no compression</div><div class="big g">−54%</div><div class="foot">only arm below the baseline</div></div>
-    <div class="card hero"><div class="lab">Cost per solved task</div><div class="big g">$1.28</div><div class="foot">lowest of any arm</div></div>
-    <div class="card hero"><div class="lab">Wall-clock time</div><div class="big g">−40%</div><div class="foot">fastest of any arm</div></div>
-    <div class="card hero"><div class="lab">Context to the model</div><div class="big g">−63%</div><div class="foot">input tokens vs baseline</div></div>
-  </div>
-
-  <h2>The leaderboard</h2>
-  <p class="h2sub">Ranked by $/solved — cache-aware total cost ÷ Docker-graded solves. Click any column header to sort. Negative vs-A0 = cheaper / leaner than running with no compression.</p>
+  <h2>Leaderboard</h2>
+  <p class="h2sub">Ranked by cost per solved task — cache-aware total cost ÷ Docker-graded solves. Click any column header to sort.</p>
   <div class="legend">
-    <span><i class="sw" style="background:#10b981"></i>dasein (hero)</span>
+    <span><i class="sw" style="background:#10b981"></i>dasein</span>
     <span><i class="sw" style="background:#64748b"></i>A0 baseline</span>
     <span><i class="sw" style="background:#8b9bc4"></i>woz</span>
     <span><i class="sw" style="background:#c9a26b"></i>headroom</span>
@@ -108,10 +101,10 @@
     <tbody></tbody>
   </table>
   </div>
-  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs. Where a layer routes some work to a different, cheaper model, those calls are kept out of these same-model columns as out-of-band overhead, so the comparison stays apples-to-apples.</p>
+  <p class="fo--note">Every arm runs the same model through the same scaffold; only the compression layer differs.</p>
 
   <h2>Compare any metric</h2>
-  <p class="h2sub">Pick a KPI — the bars re-sort best to worst. Dasein leads on cost, context, speed, and steps; two competitors cost more than the no-compression baseline. (Cache read:write is a diagnostic — higher is cheaper — not a metric Dasein tops; it explains Headroom's cost.)</p>
+  <p class="h2sub">Pick a KPI to compare across arms; the bars re-sort best to worst.</p>
   <div class="seg" id="seg"></div>
   <div class="chartwrap">
     <div style="position:relative;width:100%;height:380px">
@@ -121,7 +114,7 @@
   <p class="cap" id="cap"></p>
 
   <h2>Savings vs solve rate</h2>
-  <p class="h2sub">Cost savings versus the no-compression baseline (up) against solve rate (right) — the top-right corner is best. Dasein leads the savings axis at +54%, above the baseline line that RTK and Headroom sit below; the gap to the corner is its solve rate on this hard slice. Hover any point.</p>
+  <p class="h2sub">Cost savings versus the no-compression baseline (up) against solve rate (right); the top-right corner is best. Hover any point.</p>
   <div class="chartwrap">
     <div style="position:relative;width:100%;height:380px">
       <canvas id="scatter" role="img" aria-label="Scatter of cost per solved task versus solve rate for each arm"></canvas>
@@ -129,7 +122,7 @@
   </div>
 
   <h2>Fact vs fiction</h2>
-  <p class="h2sub">What each layer advertises, versus what we measured behind a real coding agent. No competitor's headline cost number is measured on what a coding team pays for — the cache-aware dollar cost of solving real repository tasks; they are measured on single-shot QA, shell output in isolation, or favorable-case "up to" ceilings.</p>
+  <p class="h2sub">What each layer advertises, next to what we measured behind a real coding agent. None of these headline numbers is measured on the cache-aware dollar cost of solving real repository tasks; they are measured on single-shot QA, shell output in isolation, or favorable-case "up to" ceilings.</p>
   <div style="overflow-x:auto">
   <table class="ff">
     <thead><tr><th style="text-align:left">Layer</th><th style="text-align:left">Their headline claim</th><th style="text-align:left">What we observed (n=100)</th></tr></thead>
@@ -195,13 +188,13 @@ renderBoard();
 
 /* ---- metric toggle bar chart ---- */
 const METRICS = [
-  {k:"cost_total",      name:"Total cost",      unit:"$",  better:"low",  fmt:v=>"$"+v.toFixed(0),  cap:"Cache-aware cost to run all 100 matched tasks. Dasein: <b>$64</b>."},
-  {k:"cost_per_solved", name:"Cost / solved",   unit:"$",  better:"low",  fmt:v=>"$"+v.toFixed(2),  cap:"Cache-aware total cost ÷ Docker-graded solves — the ranking metric. Dasein: <b>$1.28</b>."},
-  {k:"wall_h",          name:"Wall-clock time", unit:"h",  better:"low",  fmt:v=>v.toFixed(1)+" h",  cap:"End-to-end hours including each layer's own orchestration overhead. Dasein: <b>7.9 h</b>."},
-  {k:"steps",           name:"Agent steps",     unit:"",   better:"low",  fmt:v=>v.toLocaleString(), cap:"Total agent turns across the 100 tasks. Dasein: <b>2,984</b>, the fewest."},
-  {k:"input_m",         name:"Input tokens",    unit:"M",  better:"low",  fmt:v=>v.toFixed(0)+"M",   cap:"Total input tokens billed across the run. Dasein: <b>94M</b>, 63% below baseline."},
-  {k:"ctx_k",           name:"Peak context",    unit:"K",  better:"low",  fmt:v=>v.toFixed(1)+"K",   cap:"Mean of each task's largest single prompt. Dasein: <b>38K</b>, about half the others."},
-  {k:"crcw",            name:"Cache health",    unit:":1", better:"high", fmt:v=>v.toFixed(1)+":1",  cap:"Cache read:write ratio; higher reuse is cheaper. A diagnostic, not a leaderboard — it explains Headroom's cost (11.6)."},
+  {k:"cost_total",      name:"Total cost",      unit:"$",  better:"low",  fmt:v=>"$"+v.toFixed(0),  cap:"Cache-aware cost to run all 100 tasks. Lower is better."},
+  {k:"cost_per_solved", name:"Cost / solved",   unit:"$",  better:"low",  fmt:v=>"$"+v.toFixed(2),  cap:"Cache-aware total cost ÷ Docker-graded solves — the ranking metric. Lower is better."},
+  {k:"wall_h",          name:"Wall-clock time", unit:"h",  better:"low",  fmt:v=>v.toFixed(1)+" h",  cap:"End-to-end hours to complete the run. Lower is better."},
+  {k:"steps",           name:"Agent steps",     unit:"",   better:"low",  fmt:v=>v.toLocaleString(), cap:"Total agent turns across the 100 tasks. Lower is better."},
+  {k:"input_m",         name:"Input tokens",    unit:"M",  better:"low",  fmt:v=>v.toFixed(0)+"M",   cap:"Total input tokens billed across the run. Lower is better."},
+  {k:"ctx_k",           name:"Peak context",    unit:"K",  better:"low",  fmt:v=>v.toFixed(1)+"K",   cap:"Mean of each task's largest single prompt. Lower is better."},
+  {k:"crcw",            name:"Cache health",    unit:":1", better:"high", fmt:v=>v.toFixed(1)+":1",  cap:"Cache read:write ratio; a cached prefix is billed below fresh input, so higher reuse is cheaper."},
 ];
 let bar, curM=METRICS[0];
 function drawBar(m){
@@ -219,7 +212,7 @@ function drawBar(m){
   if(bar){bar.data=cfg.data;bar.options=cfg.options;bar.update();}
   else bar=new Chart(document.getElementById("bar"),cfg);
   // value labels via afterdraw plugin set below; caption:
-  document.getElementById("cap").innerHTML = (m.better==="low"?"Lower is better. ":"Higher is better. ")+m.cap;
+  document.getElementById("cap").innerHTML = m.cap;
 }
 const valuePlugin={id:"vlab",afterDatasetsDraw(c){if(c.canvas.id!=="bar")return;const{ctx}=c;ctx.save();ctx.font="700 12.5px -apple-system,Segoe UI,sans-serif";
   c.data.datasets[0].data.forEach((v,i)=>{const b=c.getDatasetMeta(0).data[i];ctx.fillStyle=c.data.labels[i]==="dasein"?"#047857":"#334155";

@@ -80,9 +80,7 @@ than the baseline, and only Dasein converts compression into money.
 
 Dasein completed the run in **7.9 hours**, 40% faster than the no-compression baseline and the fastest of any
 arm, using the fewest agent steps (2,984). Woz was the slowest at 17.2 hours — 30% slower than the baseline —
-because its delegated-exploration sub-agents add round-trips (mean per-call latency 13.0 s versus the
-baseline's 9.0 s). Wall-clock time includes each layer's own orchestration overhead, which is what a user
-experiences regardless of which model does the work.
+and had the highest mean per-call latency (13.0 s versus the baseline's 9.0 s).
 
 ## Where the cost comes from
 
@@ -143,16 +141,14 @@ The complete per-arm rollup. Best value in each row is in bold.
 | API calls | 3,085 | 3,247 | 3,686 | 4,454 | 4,128 |
 
 Cache read:write is the ratio of cached-prefix reads to cache writes; a lower ratio means the layer re-pays
-the cache-write rate more often. Where a layer routes some work to a different, cheaper model, those calls
-are kept out of these same-model columns as out-of-band overhead, so the token, step, and cost columns
-compare like for like; wall-clock is the one column where that overhead is visible.
+the cache-write rate more often.
 
 ## Vendor claims versus measured
 
-Every competitor advertises a large reduction in tokens, cost, or latency, but none of those numbers is
-measured on what a coding team actually pays for — the cache-aware dollar cost of solving real repository
-tasks with a multi-turn agent. They are measured on single-shot question-answering, single-document QA,
-shell-command output in isolation, token counts with no task-success check, or "up to" ceilings.
+Each of the other layers advertises a large reduction in tokens, cost, or latency, but none of those headline
+numbers is measured on what a coding team actually pays for — the cache-aware dollar cost of solving real
+repository tasks with a multi-turn agent. They are measured on single-shot question-answering, single-document
+QA, shell-command output in isolation, token counts with no task-success check, or "up to" ceilings.
 
 | Layer | Headline claim | Measured on | Our result (n = 100) |
 |---|---|---|---|
@@ -160,9 +156,9 @@ shell-command output in isolation, token counts with no task-success check, or "
 | RTK | "60–90% fewer tokens on common dev commands" | Shell-command output in isolation (its own README: native Read/Grep/Glob bypass the hook) | +17% input, +13% cost |
 | Headroom | "60–95% fewer tokens, same answers" | Single-shot QA (GSM8K, SQuAD…); its docs: "code passes through" uncompressed | +5% input, +42% cost (most expensive) |
 
-This is a summary of the arms that ran. The detailed, fully-sourced breakdown of every competitor — every
-quote, every primary source, the exact benchmark each number was measured on, and the mechanism behind each
-gap — is in **[FACT-VS-FICTION.md](FACT-VS-FICTION.md)**.
+This is a summary of the arms that ran. The detailed, fully-sourced breakdown of every layer — every quote,
+every primary source, the exact benchmark each number was measured on, and the mechanism behind each gap — is
+in **[FACT-VS-FICTION.md](FACT-VS-FICTION.md)**.
 
 ## Method
 
