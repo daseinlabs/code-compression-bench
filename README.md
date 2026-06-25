@@ -18,26 +18,21 @@
 
 ---
 
-Across 100 tasks from SWE-bench Verified, with the agent, model, and grader held fixed for every arm,
-**Dasein was the only compression layer that reduced total cost — by 54% — at the lowest cost per solved
-task of any arm**, even though it solved fewer raw tasks than the baseline (a trade the cost-per-solved
-ranking charges it for, below). Two of the three other compression layers cost *more* than running no
-compression at all.
+## Overview
 
-<p align="center">
-  <img src="results/2026-06-24/figures/1_savings_vs_baseline.png" width="820" alt="Total cost relative to the no-compression baseline: only Dasein is meaningfully below it; RTK and Headroom are above it.">
-</p>
+Every "we cut your tokens by N%" claim is measured on a different agent, a different task set, and a
+different success bar, so none of them are comparable, and none answer the question that matters: does the
+agent still solve the problem, and what did it cost end to end? This benchmark fixes everything except the
+compression layer. One scaffold (headless Claude Code), one model (`claude-sonnet-4-6`), 100 tasks from
+SWE-bench Verified, and the official SWE-bench Docker grader are held identical for every arm; only the
+compression layer changes, so any difference in cost or quality is attributable to it. Arms are ranked by
+**cost per solved task** — cache-aware total cost divided by the tasks the grader passed — the figure a
+coding team actually pays per result.
 
-> Run 2026-06-24 · **100 tasks from SWE-bench Verified** · model `claude-sonnet-4-6` · cache-aware pricing ·
+> Run 2026-06-24 · 100 tasks from SWE-bench Verified · model `claude-sonnet-4-6` · cache-aware pricing ·
 > official SWE-bench Docker grader.
 
-## Results
-
-The benchmark holds everything fixed except the compression layer: one scaffold (headless Claude Code), one
-model (`claude-sonnet-4-6`), one frozen task set, one official grader, and one cache-aware price table
-applied identically to every arm. Whatever differs between arms is attributable to the layer. Arms are ranked
-by **cost per solved task** — cache-aware total cost divided by the number of tasks the grader passed — the
-single figure a coding team actually pays per result.
+## Leaderboard
 
 | Arm | Solved | $ / solved | Total cost | vs baseline | Input tokens | vs baseline | Wall-clock | Cache R:W |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -56,6 +51,10 @@ Dasein solved fewer raw tasks on this set (discussed below), and it still ranks 
 The cache-aware pricing above is the conservative frame. Even at undiscounted list price — no cache
 assumptions at all — the ordering is identical and the gap wider: Dasein costs **$287** to the baseline's
 **$803** (−64%), against $613–805 for the other arms.
+
+<p align="center">
+  <img src="results/2026-06-24/figures/1_savings_vs_baseline.png" width="820" alt="Total cost relative to the no-compression baseline: Dasein −54%; Woz −6%; RTK +13% and Headroom +42% sit above the baseline.">
+</p>
 
 ## Cost
 
