@@ -30,7 +30,7 @@ COL = {"dasein": HERO, "A0": SLATE, "woz": "#8b9bc4", "headroom": "#c9a26b", "rt
 EDGE = {"dasein": HERO_DARK, "A0": SLATE_DK, "woz": "#5f6f9c", "headroom": "#a07f47", "rtk": "#8c6690"}
 INK = "#1e293b"; INK_SOFT = "#64748b"; GRID = "#e6ebf1"
 BAD = "#d98a8a"; BAD_DK = "#b04a4a"
-LABEL = {"dasein": "dasein", "A0": "A0  baseline", "woz": "woz", "headroom": "headroom", "rtk": "rtk"}
+LABEL = {"dasein": "Dasein", "A0": "Baseline", "woz": "Woz", "headroom": "Headroom", "rtk": "RTK"}
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -129,7 +129,7 @@ def fig_savings():
     ax.set_xlabel("total cost vs the no-compression baseline   (negative = cheaper)", fontsize=12, color=INK_SOFT)
     ax.xaxis.grid(True, color=GRID, linewidth=1, zorder=0); ax.set_axisbelow(True)
     frame(ax)
-    ax.text(0, 1.04, "A0 baseline", transform=ax.get_xaxis_transform(),
+    ax.text(0, 1.04, "Baseline", transform=ax.get_xaxis_transform(),
             ha="center", va="bottom", fontsize=11, fontweight="bold", color=SLATE_DK)
     ax.text(0.02, -0.16, "cheaper than no compression", transform=ax.transAxes,
             ha="left", color=HERO_DARK, fontsize=11)
@@ -268,7 +268,53 @@ def fig_cache():
     footer(fig)
     fig.savefig(os.path.join(OUT, "9_cache_health.png")); plt.close(fig)
 
+# ── 10. cost vs time scatter ────────────────────────────────────────────────
+def fig_cost_time():
+    fig = plt.figure(figsize=(11.4, 7.0))
+    ax = fig.add_axes([0.11, 0.135, 0.84, 0.60])
+    pts = {a: (A[a]["wall_h_total"], A[a]["cost_total"]) for a in A}  # x = hours, y = $
+    xs = [p[0] for p in pts.values()]; ys = [p[1] for p in pts.values()]
+    xlo, xhi = min(xs) - 1.6, max(xs) + 2.4
+    ylo, yhi = min(ys) - 26, max(ys) + 26
+    ax.set_xlim(xlo, xhi); ax.set_ylim(ylo, yhi)
+    # best = bottom-left (cheaper + faster); shade that quadrant lightly off the baseline point
+    bx, by = pts["A0"]
+    ax.axhspan(ylo, by, xmin=0, xmax=(bx - xlo) / (xhi - xlo), color=HERO, alpha=0.05, zorder=0)
+    ax.axvline(bx, color=SLATE, ls=(0, (4, 4)), lw=1.0, zorder=1)
+    ax.axhline(by, color=SLATE, ls=(0, (4, 4)), lw=1.0, zorder=1)
+    ax.text(xlo + 0.3, ylo + 8, "cheaper + faster", color=HERO_DARK, fontsize=11, va="bottom", ha="left")
+    ax.text(bx + 0.12, yhi - 6, "baseline", color=SLATE, fontsize=9.5, va="top", ha="left")
+    for a, (x, y) in pts.items():
+        ax.scatter([x], [y], s=520, color="white", edgecolor="white", zorder=4.4)
+    for a, (x, y) in pts.items():
+        big = a == "dasein"
+        ax.scatter([x], [y], s=300, color=COL[a], edgecolor=EDGE[a],
+                   linewidth=2.2 if big else 1.3, zorder=5)
+    place = {  # dx (hours), dy ($), ha, va
+        "dasein":   (0.5, 0, "left", "center"),
+        "A0":       (-0.45, -9, "right", "top"),
+        "rtk":      (0.45, 8, "left", "bottom"),
+        "headroom": (0.45, 0, "left", "center"),
+        "woz":      (0.45, 0, "left", "center"),
+    }
+    for a, (dx, dy, ha, va) in place.items():
+        x, y = pts[a]; big = a == "dasein"
+        ax.text(x + dx, y + dy, f"{LABEL[a]}  ${y:.0f}", ha=ha, va=va,
+                fontsize=13.5 if big else 12, fontweight="bold" if big else "normal",
+                color=HERO_DARK if big else INK, zorder=6)
+    ax.set_xlabel("wall-clock hours over the run  ←  faster is better", fontsize=12, color=INK_SOFT)
+    ax.set_ylabel("total cost (USD)  ↓ cheaper is better", fontsize=12, color=INK_SOFT)
+    from matplotlib.ticker import FuncFormatter
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f} h"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:.0f}"))
+    ax.grid(True, color=GRID, linewidth=1, zorder=0); ax.set_axisbelow(True)
+    frame(ax); ax.spines["left"].set_visible(True); ax.spines["left"].set_color("#cbd5e1")
+    titleblock(fig, "Cost versus time",
+               "Total cost against wall-clock time over the 100 tasks. The bottom-left corner is best: cheaper and faster.")
+    footer(fig)
+    fig.savefig(os.path.join(OUT, "10_cost_vs_time.png")); plt.close(fig)
+
 for f in (fig_savings, fig_cost_per_solved, fig_total_cost, fig_speed, fig_steps,
-          fig_context, fig_input, fig_scatter, fig_cache):
+          fig_context, fig_input, fig_scatter, fig_cache, fig_cost_time):
     f(); print("ok", f.__name__)
 print("DONE ->", OUT)

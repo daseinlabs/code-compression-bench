@@ -82,6 +82,16 @@ Dasein completed the run in **7.9 hours**, 40% faster than the no-compression ba
 arm, using the fewest agent steps (2,984). Woz was the slowest at 17.2 hours — 30% slower than the baseline —
 and had the highest mean per-call latency (13.0 s versus the baseline's 9.0 s).
 
+## Cost and time together
+
+<p align="center">
+  <img src="results/2026-06-24/figures/10_cost_vs_time.png" width="760" alt="Total cost versus wall-clock time; Dasein alone is below the baseline on both axes (cheaper and faster).">
+</p>
+
+Plotting total cost against wall-clock time places the best arm in the bottom-left corner — cheaper and
+faster. Dasein is the only arm there: it is below the baseline on both axes at the same time. Every other
+arm is slower than the baseline, more expensive, or both.
+
 ## Where the cost comes from
 
 <p align="center">

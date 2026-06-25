@@ -77,11 +77,11 @@
   <h2>Leaderboard</h2>
   <p class="h2sub">Ranked by cost per solved task — cache-aware total cost ÷ Docker-graded solves. Click any column header to sort.</p>
   <div class="legend">
-    <span><i class="sw" style="background:#10b981"></i>dasein</span>
-    <span><i class="sw" style="background:#64748b"></i>A0 baseline</span>
-    <span><i class="sw" style="background:#8b9bc4"></i>woz</span>
-    <span><i class="sw" style="background:#c9a26b"></i>headroom</span>
-    <span><i class="sw" style="background:#b48ab8"></i>rtk</span>
+    <span><i class="sw" style="background:#10b981"></i>Dasein</span>
+    <span><i class="sw" style="background:#64748b"></i>Baseline</span>
+    <span><i class="sw" style="background:#8b9bc4"></i>Woz</span>
+    <span><i class="sw" style="background:#c9a26b"></i>Headroom</span>
+    <span><i class="sw" style="background:#b48ab8"></i>RTK</span>
   </div>
   <div style="overflow-x:auto">
   <table id="board">
@@ -123,16 +123,24 @@
     </div>
   </div>
 
+  <h2>Cost vs time</h2>
+  <p class="h2sub">Total cost against wall-clock time over the 100 tasks; the bottom-left corner is best — cheaper and faster. Hover any point.</p>
+  <div class="chartwrap">
+    <div style="position:relative;width:100%;height:380px">
+      <canvas id="scatter2" role="img" aria-label="Scatter of total cost versus wall-clock time for each arm"></canvas>
+    </div>
+  </div>
+
   <h2>Fact vs fiction</h2>
   <p class="h2sub">What each layer advertises, next to what we measured behind a real coding agent. None of these headline numbers is measured on the cache-aware dollar cost of solving real repository tasks; they are measured on single-shot QA, shell output in isolation, or favorable-case "up to" ceilings.</p>
   <div style="overflow-x:auto">
   <table class="ff">
     <thead><tr><th style="text-align:left">Layer</th><th style="text-align:left">Their headline claim</th><th style="text-align:left">What we observed (n=100)</th></tr></thead>
     <tbody>
-      <tr><td>dasein</td><td class="claim">Curates the agent's working context</td><td class="obs">−54% cost, −63% input, $1.28/solved (lowest), fastest, fewest steps; solves 50/100 vs 62 baseline — wins on $/solved</td></tr>
-      <tr><td>woz</td><td class="claim">"Cut your Claude Code costs in half"; "30–40% faster" (an estimate)</td><td class="obs">−6% cost, −22% input, same solves as baseline, +30% <i>slower</i> wall-clock</td></tr>
-      <tr><td>rtk</td><td class="claim">"60–90% fewer tokens on common dev commands"</td><td class="obs">+17% input, +13% cost; its hook only rewrites shell output — native Read/Grep/Glob bypass it</td></tr>
-      <tr><td>headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+5% input, +42% cost (most expensive); weakest cache reuse — its docs: "code passes through" uncompressed</td></tr>
+      <tr><td>Dasein</td><td class="claim">Curates the agent's working context</td><td class="obs">−54% cost, −63% input, $1.28/solved (lowest), fastest, fewest steps; solves 50/100 vs 62 baseline — wins on $/solved</td></tr>
+      <tr><td>Woz</td><td class="claim">"Cut your Claude Code costs in half"; "30–40% faster" (an estimate)</td><td class="obs">−6% cost, −22% input, same solves as baseline, +30% <i>slower</i> wall-clock</td></tr>
+      <tr><td>RTK</td><td class="claim">"60–90% fewer tokens on common dev commands"</td><td class="obs">+17% input, +13% cost; its hook only rewrites shell output — native Read/Grep/Glob bypass it</td></tr>
+      <tr><td>Headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+5% input, +42% cost (most expensive); weakest cache reuse — its docs: "code passes through" uncompressed</td></tr>
     </tbody>
   </table>
   </div>
@@ -147,11 +155,11 @@
 <script src="chart.umd.min.js"></script>
 <script>
 const ARMS = {
-  dasein:  {label:"dasein",      c:"#10b981", e:"#047857", solved:50, solve_rate:50, cost_total:64.21, cost_per_solved:1.28, cost_list:286.72, input_m:94.1,  output_m:1.46, steps:2984, wall_h:7.94, lat:7.93, ctx_k:38.1, hit:92.7, crcw:22.7, deaths:0, vs_a0_cost_pct:-53.5, vs_a0_input_pct:-63.2, vs_a0_time_pct:-40.2},
-  A0:      {label:"A0 baseline", c:"#64748b", e:"#334155", solved:62, solve_rate:62, cost_total:138.17,cost_per_solved:2.23, cost_list:803.37, input_m:255.9, output_m:2.55, steps:3677, wall_h:13.28,lat:8.97, ctx_k:74.9, hit:95.9, crcw:40.4, deaths:0, vs_a0_cost_pct:0,     vs_a0_input_pct:0,     vs_a0_time_pct:0},
-  woz:     {label:"woz",         c:"#8b9bc4", e:"#5f6f9c", solved:62, solve_rate:62, cost_total:130.29,cost_per_solved:2.10, cost_list:612.61, input_m:199.2, output_m:2.69, steps:3147, wall_h:17.24,lat:13.01,ctx_k:76.8, hit:93.4, crcw:22.1, deaths:0, vs_a0_cost_pct:-5.7,  vs_a0_input_pct:-22.2, vs_a0_time_pct:29.8},
-  headroom:{label:"headroom",    c:"#c9a26b", e:"#a07f47", solved:59, solve_rate:59, cost_total:196.65,cost_per_solved:3.33, cost_list:734.64, input_m:268.9, output_m:2.70, steps:3684, wall_h:14.34,lat:10.43,ctx_k:66.7, hit:88.2, crcw:11.6, deaths:1, vs_a0_cost_pct:42.3,  vs_a0_input_pct:5.1,   vs_a0_time_pct:8.0},
-  rtk:     {label:"rtk",         c:"#b48ab8", e:"#8c6690", solved:60, solve_rate:60, cost_total:156.72,cost_per_solved:2.61, cost_list:805.49, input_m:300.3, output_m:2.80, steps:3915, wall_h:14.61,lat:9.38, ctx_k:71.5, hit:92.2, crcw:44.0, deaths:0, vs_a0_cost_pct:13.4,  vs_a0_input_pct:17.3,  vs_a0_time_pct:10.0},
+  dasein:  {label:"Dasein",      c:"#10b981", e:"#047857", solved:50, solve_rate:50, cost_total:64.21, cost_per_solved:1.28, cost_list:286.72, input_m:94.1,  output_m:1.46, steps:2984, wall_h:7.94, lat:7.93, ctx_k:38.1, hit:92.7, crcw:22.7, deaths:0, vs_a0_cost_pct:-53.5, vs_a0_input_pct:-63.2, vs_a0_time_pct:-40.2},
+  A0:      {label:"Baseline", c:"#64748b", e:"#334155", solved:62, solve_rate:62, cost_total:138.17,cost_per_solved:2.23, cost_list:803.37, input_m:255.9, output_m:2.55, steps:3677, wall_h:13.28,lat:8.97, ctx_k:74.9, hit:95.9, crcw:40.4, deaths:0, vs_a0_cost_pct:0,     vs_a0_input_pct:0,     vs_a0_time_pct:0},
+  woz:     {label:"Woz",         c:"#8b9bc4", e:"#5f6f9c", solved:62, solve_rate:62, cost_total:130.29,cost_per_solved:2.10, cost_list:612.61, input_m:199.2, output_m:2.69, steps:3147, wall_h:17.24,lat:13.01,ctx_k:76.8, hit:93.4, crcw:22.1, deaths:0, vs_a0_cost_pct:-5.7,  vs_a0_input_pct:-22.2, vs_a0_time_pct:29.8},
+  headroom:{label:"Headroom",    c:"#c9a26b", e:"#a07f47", solved:59, solve_rate:59, cost_total:196.65,cost_per_solved:3.33, cost_list:734.64, input_m:268.9, output_m:2.70, steps:3684, wall_h:14.34,lat:10.43,ctx_k:66.7, hit:88.2, crcw:11.6, deaths:1, vs_a0_cost_pct:42.3,  vs_a0_input_pct:5.1,   vs_a0_time_pct:8.0},
+  rtk:     {label:"RTK",         c:"#b48ab8", e:"#8c6690", solved:60, solve_rate:60, cost_total:156.72,cost_per_solved:2.61, cost_list:805.49, input_m:300.3, output_m:2.80, steps:3915, wall_h:14.61,lat:9.38, ctx_k:71.5, hit:92.2, crcw:44.0, deaths:0, vs_a0_cost_pct:13.4,  vs_a0_input_pct:17.3,  vs_a0_time_pct:10.0},
 };
 const ORDER = ["dasein","A0","woz","headroom","rtk"];
 const fmtPct = v => (v>0?"+":"")+v.toFixed(0)+"%";
@@ -218,7 +226,7 @@ function drawBar(m){
   document.getElementById("cap").innerHTML = m.cap;
 }
 const valuePlugin={id:"vlab",afterDatasetsDraw(c){if(c.canvas.id!=="bar")return;const{ctx}=c;ctx.save();ctx.font="700 12.5px -apple-system,Segoe UI,sans-serif";
-  c.data.datasets[0].data.forEach((v,i)=>{const b=c.getDatasetMeta(0).data[i];ctx.fillStyle=c.data.labels[i]==="dasein"?"#047857":"#334155";
+  c.data.datasets[0].data.forEach((v,i)=>{const b=c.getDatasetMeta(0).data[i];ctx.fillStyle=c.data.labels[i]==="Dasein"?"#047857":"#334155";
   ctx.textBaseline="middle";ctx.fillText(curM.fmt(v),b.x+7,b.y);});ctx.restore();}};
 Chart.register(valuePlugin);
 const scatterLabels={id:"slab",afterDatasetsDraw(c){const{ctx}=c;ctx.save();ctx.textBaseline="middle";
@@ -248,6 +256,29 @@ new Chart(document.getElementById("scatter"),{
       y:{title:{display:true,text:"cost savings vs baseline (%)  ↑ more savings is better",color:"#64748b"},
          min:-54,max:66,grid:{color:c=>c.tick&&c.tick.value===0?"#94a3b8":"#eef2f6"},
          ticks:{color:"#64748b",callback:v=>(v>0?"+":"")+v+"%"}}}}
+});
+
+/* ---- cost vs time scatter ---- */
+const scatterLabels2={id:"slab2",afterDatasetsDraw(c){const{ctx}=c;ctx.save();ctx.textBaseline="middle";
+  const off={dasein:[14,2,"left"],A0:[12,15,"left"],rtk:[12,-3,"left"],headroom:[12,0,"left"],woz:[12,0,"left"]};
+  c.data.datasets.forEach((ds,i)=>{const p=c.getDatasetMeta(i).data[0];if(!p)return;const k=ORDER[i];const o=off[k]||[12,0,"left"];
+  ctx.textAlign=o[2];ctx.fillStyle=k==="dasein"?"#047857":"#334155";ctx.font=(k==="dasein"?"700 ":"500 ")+"12px -apple-system,Segoe UI,sans-serif";
+  ctx.fillText(ds.label,p.x+o[0],p.y+o[1]);});ctx.restore();}};
+new Chart(document.getElementById("scatter2"),{
+  type:"scatter",
+  plugins:[scatterLabels2],
+  data:{datasets:ORDER.map(k=>({label:ARMS[k].label,data:[{x:ARMS[k].wall_h,y:ARMS[k].cost_total}],
+    backgroundColor:ARMS[k].c,borderColor:ARMS[k].e,borderWidth:k==="dasein"?2.5:1.2,
+    pointRadius:9,pointHoverRadius:12}))},
+  options:{responsive:true,maintainAspectRatio:false,animation:false,
+    layout:{padding:14},
+    plugins:{legend:{display:false},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x.toFixed(1)} h · $${c.parsed.y.toFixed(0)}`}}},
+    scales:{
+      x:{title:{display:true,text:"wall-clock hours  ←  faster is better",color:"#64748b"},
+         min:6,max:19.5,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>v+" h"}},
+      y:{title:{display:true,text:"total cost (USD)  ↓ cheaper is better",color:"#64748b"},
+         min:40,max:215,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>"$"+v}}}}
 });
 </script>
 </body>
