@@ -85,12 +85,12 @@ and had the highest mean per-call latency (13.0 s versus the baseline's 9.0 s).
 ## Cost and time together
 
 <p align="center">
-  <img src="results/2026-06-24/figures/10_cost_vs_time.png" width="760" alt="Total cost versus wall-clock time; Dasein alone is below the baseline on both axes (cheaper and faster).">
+  <img src="results/2026-06-24/figures/10_cost_vs_time.png" width="760" alt="Cost savings versus time savings vs the baseline; Dasein alone sits in the top-right, saving on both.">
 </p>
 
-Plotting total cost against wall-clock time places the best arm in the bottom-left corner — cheaper and
-faster. Dasein is the only arm there: it is below the baseline on both axes at the same time. Every other
-arm is slower than the baseline, more expensive, or both.
+Plotting cost savings against time savings — both versus the baseline — places the best arm in the top-right
+corner, saving on both. Dasein is the only arm there: it cuts cost 54% and wall-clock time 40% at the same
+time. Every other arm saves on at most one axis, and RTK and Headroom lose on both.
 
 ## Where the cost comes from
 

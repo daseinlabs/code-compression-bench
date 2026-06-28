@@ -124,7 +124,7 @@
   </div>
 
   <h2>Cost vs time</h2>
-  <p class="h2sub">Total cost against wall-clock time over the 100 tasks; the bottom-left corner is best — cheaper and faster. Hover any point.</p>
+  <p class="h2sub">Cost savings against time savings, both versus the no-compression baseline; the top-right corner is best — saving on both. Hover any point.</p>
   <div class="chartwrap">
     <div style="position:relative;width:100%;height:380px">
       <canvas id="scatter2" role="img" aria-label="Scatter of total cost versus wall-clock time for each arm"></canvas>
@@ -260,25 +260,25 @@ new Chart(document.getElementById("scatter"),{
 
 /* ---- cost vs time scatter ---- */
 const scatterLabels2={id:"slab2",afterDatasetsDraw(c){const{ctx}=c;ctx.save();ctx.textBaseline="middle";
-  const off={dasein:[14,2,"left"],A0:[12,15,"left"],rtk:[12,-3,"left"],headroom:[12,0,"left"],woz:[12,0,"left"]};
-  c.data.datasets.forEach((ds,i)=>{const p=c.getDatasetMeta(i).data[0];if(!p)return;const k=ORDER[i];const o=off[k]||[12,0,"left"];
+  const off={dasein:[-14,2,"right"],A0:[12,14,"left"],rtk:[13,0,"left"],headroom:[13,0,"left"],woz:[13,0,"left"]};
+  c.data.datasets.forEach((ds,i)=>{const p=c.getDatasetMeta(i).data[0];if(!p)return;const k=ORDER[i];const o=off[k]||[13,0,"left"];
   ctx.textAlign=o[2];ctx.fillStyle=k==="dasein"?"#047857":"#334155";ctx.font=(k==="dasein"?"700 ":"500 ")+"12px -apple-system,Segoe UI,sans-serif";
   ctx.fillText(ds.label,p.x+o[0],p.y+o[1]);});ctx.restore();}};
 new Chart(document.getElementById("scatter2"),{
   type:"scatter",
   plugins:[scatterLabels2],
-  data:{datasets:ORDER.map(k=>({label:ARMS[k].label,data:[{x:ARMS[k].wall_h,y:ARMS[k].cost_total}],
+  data:{datasets:ORDER.map(k=>({label:ARMS[k].label,data:[{x:-ARMS[k].vs_a0_time_pct,y:-ARMS[k].vs_a0_cost_pct}],
     backgroundColor:ARMS[k].c,borderColor:ARMS[k].e,borderWidth:k==="dasein"?2.5:1.2,
     pointRadius:9,pointHoverRadius:12}))},
   options:{responsive:true,maintainAspectRatio:false,animation:false,
     layout:{padding:14},
     plugins:{legend:{display:false},
-      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x.toFixed(1)} h · $${c.parsed.y.toFixed(0)}`}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.x>=0?"+":""}${c.parsed.x.toFixed(0)}% time · ${c.parsed.y>=0?"+":""}${c.parsed.y.toFixed(0)}% cost vs baseline`}}},
     scales:{
-      x:{title:{display:true,text:"wall-clock hours  ←  faster is better",color:"#64748b"},
-         min:6,max:19.5,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>v+" h"}},
-      y:{title:{display:true,text:"total cost (USD)  ↓ cheaper is better",color:"#64748b"},
-         min:40,max:215,grid:{color:"#eef2f6"},ticks:{color:"#64748b",callback:v=>"$"+v}}}}
+      x:{title:{display:true,text:"time savings vs baseline (%)  →  more savings is better",color:"#64748b"},
+         min:-40,max:54,grid:{color:c=>c.tick&&c.tick.value===0?"#94a3b8":"#eef2f6"},ticks:{color:"#64748b",callback:v=>(v>0?"+":"")+v+"%"}},
+      y:{title:{display:true,text:"cost savings vs baseline (%)  ↑ more savings is better",color:"#64748b"},
+         min:-52,max:66,grid:{color:c=>c.tick&&c.tick.value===0?"#94a3b8":"#eef2f6"},ticks:{color:"#64748b",callback:v=>(v>0?"+":"")+v+"%"}}}}
 });
 </script>
 </body>

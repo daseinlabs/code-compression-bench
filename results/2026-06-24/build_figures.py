@@ -271,46 +271,47 @@ def fig_cache():
 # ── 10. cost vs time scatter ────────────────────────────────────────────────
 def fig_cost_time():
     fig = plt.figure(figsize=(11.4, 7.0))
-    ax = fig.add_axes([0.11, 0.135, 0.84, 0.60])
-    pts = {a: (A[a]["wall_h_total"], A[a]["cost_total"]) for a in A}  # x = hours, y = $
+    ax = fig.add_axes([0.115, 0.135, 0.83, 0.60])
+    # x = time savings vs baseline (%), y = cost savings vs baseline (%); up + right is better
+    pts = {a: (-A[a]["vs_a0_time_pct"], -A[a]["vs_a0_cost_pct"]) for a in A}
     xs = [p[0] for p in pts.values()]; ys = [p[1] for p in pts.values()]
-    xlo, xhi = min(xs) - 1.6, max(xs) + 2.4
-    ylo, yhi = min(ys) - 26, max(ys) + 26
+    xlo, xhi = min(xs) - 12, max(xs) + 16
+    ylo, yhi = min(ys) - 12, max(ys) + 14
     ax.set_xlim(xlo, xhi); ax.set_ylim(ylo, yhi)
-    # best = bottom-left (cheaper + faster); shade that quadrant lightly off the baseline point
-    bx, by = pts["A0"]
-    ax.axhspan(ylo, by, xmin=0, xmax=(bx - xlo) / (xhi - xlo), color=HERO, alpha=0.05, zorder=0)
-    ax.axvline(bx, color=SLATE, ls=(0, (4, 4)), lw=1.0, zorder=1)
-    ax.axhline(by, color=SLATE, ls=(0, (4, 4)), lw=1.0, zorder=1)
-    ax.text(xlo + 0.3, ylo + 8, "cheaper + faster", color=HERO_DARK, fontsize=11, va="bottom", ha="left")
-    ax.text(bx + 0.12, yhi - 6, "baseline", color=SLATE, fontsize=9.5, va="top", ha="left")
+    # best = top-right (saves on both cost and time); shade that quadrant
+    ax.axhspan(0, yhi, xmin=(0 - xlo) / (xhi - xlo), xmax=1, color=HERO, alpha=0.06, zorder=0)
+    ax.axhline(0, color=SLATE_DK, ls=(0, (4, 4)), lw=1.2, zorder=1)
+    ax.axvline(0, color=SLATE_DK, ls=(0, (4, 4)), lw=1.2, zorder=1)
+    ax.text(xhi - 1, yhi - 3, "saves on both", ha="right", va="top", color=HERO_DARK, fontsize=11)
+    ax.text(0.8, ylo + 3, "baseline", ha="left", va="bottom", color=SLATE_DK, fontsize=9.5)
     for a, (x, y) in pts.items():
         ax.scatter([x], [y], s=520, color="white", edgecolor="white", zorder=4.4)
     for a, (x, y) in pts.items():
         big = a == "dasein"
         ax.scatter([x], [y], s=300, color=COL[a], edgecolor=EDGE[a],
                    linewidth=2.2 if big else 1.3, zorder=5)
-    place = {  # dx (hours), dy ($), ha, va
-        "dasein":   (0.5, 0, "left", "center"),
-        "A0":       (-0.45, -9, "right", "top"),
-        "rtk":      (0.45, 8, "left", "bottom"),
-        "headroom": (0.45, 0, "left", "center"),
-        "woz":      (0.45, 0, "left", "center"),
+    place = {  # dx (% time), dy (% cost), ha, va
+        "dasein":   (2.2, 0, "left", "center"),
+        "woz":      (2.2, 0, "left", "center"),
+        "A0":       (2.0, -2, "left", "top"),
+        "rtk":      (2.2, 0, "left", "center"),
+        "headroom": (2.2, 0, "left", "center"),
     }
     for a, (dx, dy, ha, va) in place.items():
         x, y = pts[a]; big = a == "dasein"
-        ax.text(x + dx, y + dy, f"{LABEL[a]}  ${y:.0f}", ha=ha, va=va,
+        ax.text(x + dx, y + dy, LABEL[a], ha=ha, va=va,
                 fontsize=13.5 if big else 12, fontweight="bold" if big else "normal",
                 color=HERO_DARK if big else INK, zorder=6)
-    ax.set_xlabel("wall-clock hours over the run  ←  faster is better", fontsize=12, color=INK_SOFT)
-    ax.set_ylabel("total cost (USD)  ↓ cheaper is better", fontsize=12, color=INK_SOFT)
+    ax.set_xlabel("time savings vs baseline (%)  →  more savings is better", fontsize=12, color=INK_SOFT)
+    ax.set_ylabel("cost savings vs baseline (%)  ↑ more savings is better", fontsize=12, color=INK_SOFT)
     from matplotlib.ticker import FuncFormatter
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f} h"))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:.0f}"))
+    pf = lambda v, _: ("0%" if abs(v) < 0.5 else f"{v:+.0f}%")
+    ax.xaxis.set_major_formatter(FuncFormatter(pf))
+    ax.yaxis.set_major_formatter(FuncFormatter(pf))
     ax.grid(True, color=GRID, linewidth=1, zorder=0); ax.set_axisbelow(True)
     frame(ax); ax.spines["left"].set_visible(True); ax.spines["left"].set_color("#cbd5e1")
-    titleblock(fig, "Cost versus time",
-               "Total cost against wall-clock time over the 100 tasks. The bottom-left corner is best: cheaper and faster.")
+    titleblock(fig, "Cost savings versus time savings",
+               "Both measured against the no-compression baseline; up and right is better. Dasein is the only arm that saves on both.")
     footer(fig)
     fig.savefig(os.path.join(OUT, "10_cost_vs_time.png")); plt.close(fig)
 
