@@ -1,0 +1,75 @@
+{
+  "matched_n": 100,
+  "arms": {
+    "A0": {
+      "n": 100,
+      "solved": 57,
+      "calls": 5325,
+      "input_tokens": 312155702,
+      "cache_read": 303906909,
+      "cache_write": 7305021,
+      "output_tokens": 2995396,
+      "cost_total": 147.3,
+      "cost_per_solved": 2.58,
+      "vs_a0_pct": 0.0,
+      "cr_cw": 41.6,
+      "input_vs_a0_pct": 0.0
+    },
+    "dasein": {
+      "n": 100,
+      "solved": 62,
+      "calls": 4856,
+      "input_tokens": 144848154,
+      "cache_read": 138609919,
+      "cache_write": 6120174,
+      "output_tokens": 1710404,
+      "cost_total": 89.65,
+      "cost_per_solved": 1.45,
+      "vs_a0_pct": -39.1,
+      "cr_cw": 22.6,
+      "input_vs_a0_pct": -53.6
+    },
+    "woz": {
+      "n": 100,
+      "solved": 55,
+      "calls": 3322,
+      "input_tokens": 203148435,
+      "cache_read": 195081370,
+      "cache_write": 7889215,
+      "output_tokens": 2953367,
+      "cost_total": 128.28,
+      "cost_per_solved": 2.33,
+      "vs_a0_pct": -12.9,
+      "cr_cw": 24.7,
+      "input_vs_a0_pct": -34.9
+    },
+    "headroom": {
+      "n": 100,
+      "solved": 58,
+      "calls": 5850,
+      "input_tokens": 329601703,
+      "cache_read": 301864848,
+      "cache_write": 26690425,
+      "output_tokens": 2949864,
+      "cost_total": 212.14,
+      "cost_per_solved": 3.66,
+      "vs_a0_pct": 44.0,
+      "cr_cw": 11.3,
+      "input_vs_a0_pct": 5.6
+    },
+    "rtk": {
+      "n": 100,
+      "solved": 54,
+      "calls": 6131,
+      "input_tokens": 360720184,
+      "cache_read": 352335049,
+      "cache_write": 7591721,
+      "output_tokens": 3220249,
+      "cost_total": 165.77,
+      "cost_per_solved": 3.07,
+      "vs_a0_pct": 12.54,
+      "cr_cw": 46.4,
+      "input_vs_a0_pct": 15.6
+    }
+  }
+}

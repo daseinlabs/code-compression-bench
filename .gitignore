@@ -1,0 +1,40 @@
+# Secrets — never commit real keys
+.env
+.env.*
+!.env.example
+*.key
+*-key.json
+*credentials*.json
+service-account*.json
+api_key_dump.txt
+*key*dump*
+*_keys.txt
+*secrets*.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Run artifacts (raw); curated results/figures are committed under results/
+runs/
+traj/
+*.log
+.cache/
+
+# Edgee fork build output (clone of edgee-ai/edgee + cargo target/; rebuilt on the
+# runner box from selfhost/edgee/anthropic_upstream.patch — never committed).
+selfhost/edgee/build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# session scratch + raw run outputs (not committed)
+*.bak*
+/runs/
+/runs_smoke/
+_cc_kpi.py
+_woz_live_capture.txt

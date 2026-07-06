@@ -1,0 +1,143 @@
+diff --git a/crates/cli/src/local_gateway.rs b/crates/cli/src/local_gateway.rs
+index c80412e..4c8bef1 100644
+--- a/crates/cli/src/local_gateway.rs
++++ b/crates/cli/src/local_gateway.rs
+@@ -17,11 +17,64 @@ use tower::ServiceBuilder;
+ 
+ use edgee_compression_layer::{CompressionConfig, CompressionLayer};
+ use edgee_gateway_core::{
++    config::{AnthropicPassthroughConfig, OpenAIPassthroughConfig},
+     passthrough::{anthropic::AnthropicPassthroughService, openai::OpenAIPassthroughService},
+     HttpClient, ReqwestHttpClient,
+ };
+ use edgee_gateway_http::{Error, PassthroughLayer};
+ 
++/// Env var overriding the Anthropic Messages upstream the local gateway forwards
++/// `/v1/messages` to. Unset → the provider default (`https://api.anthropic.com`).
++///
++/// This is the seam the self-hosted deployments need: the passthrough config has
++/// always supported a `with_base_url` override (unit-tested in
++/// `edgee_gateway_core`), but `start()` historically built the service with the
++/// default config, so there was no way to point the Anthropic upstream anywhere
++/// but `api.anthropic.com`. Reading this env var here wires that override through,
++/// so an operator can route compressed Claude Code `/v1/messages` traffic at their
++/// own Anthropic-compatible endpoint (e.g. a billing/usage gateway) instead.
++const ANTHROPIC_UPSTREAM_ENV: &str = "EDGEE_ANTHROPIC_UPSTREAM";
++
++/// Env var overriding the OpenAI Responses upstream the local gateway forwards
++/// `/v1/responses` to. Unset → the provider defaults. Both the Platform and the
++/// ChatGPT-backend endpoints are pinned to this value when set (mirrors
++/// `OpenAIPassthroughConfig::with_api_url` + `with_chatgpt_url`).
++const OPENAI_UPSTREAM_ENV: &str = "EDGEE_OPENAI_UPSTREAM";
++
++/// Build the Anthropic passthrough config, honoring [`ANTHROPIC_UPSTREAM_ENV`].
++///
++/// Returns the default config (production `api.anthropic.com`) when the env var
++/// is unset or empty, so behavior is unchanged unless an operator opts in.
++fn anthropic_passthrough_config() -> AnthropicPassthroughConfig {
++    match std::env::var(ANTHROPIC_UPSTREAM_ENV) {
++        Ok(url) if !url.trim().is_empty() => {
++            let url = url.trim().trim_end_matches('/').to_owned();
++            tracing::info!(upstream = %url, env = ANTHROPIC_UPSTREAM_ENV, "anthropic upstream overridden");
++            AnthropicPassthroughConfig::default().with_base_url(url)
++        }
++        _ => AnthropicPassthroughConfig::default(),
++    }
++}
++
++/// Build the OpenAI passthrough config, honoring [`OPENAI_UPSTREAM_ENV`].
++///
++/// Pins BOTH OpenAI endpoints to the override when set; otherwise returns the
++/// production defaults unchanged. The override base is suffixed with
++/// `/v1/responses` (the path the production URLs carry) so a bare base URL works.
++fn openai_passthrough_config() -> OpenAIPassthroughConfig {
++    match std::env::var(OPENAI_UPSTREAM_ENV) {
++        Ok(url) if !url.trim().is_empty() => {
++            let base = url.trim().trim_end_matches('/');
++            let responses = format!("{base}/v1/responses");
++            tracing::info!(upstream = %responses, env = OPENAI_UPSTREAM_ENV, "openai upstream overridden");
++            OpenAIPassthroughConfig::default()
++                .with_api_url(responses.clone())
++                .with_chatgpt_url(responses)
++        }
++        _ => OpenAIPassthroughConfig::default(),
++    }
++}
++
+ /// Bound for the TCP/TLS handshake against the upstream provider.
+ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+@@ -74,6 +127,11 @@ pub async fn start(addr: SocketAddr) -> Result<LocalGatewayHandle> {
+         .service(
+             AnthropicPassthroughService::builder()
+                 .client(http_client.clone())
++                // Wire the Anthropic upstream from EDGEE_ANTHROPIC_UPSTREAM (default
++                // api.anthropic.com) via the existing with_base_url override, so a
++                // self-hosted gateway can forward compressed /v1/messages traffic
++                // to an operator's own Anthropic-compatible endpoint.
++                .config(anthropic_passthrough_config())
+                 .build(),
+         );
+ 
+@@ -86,6 +144,9 @@ pub async fn start(addr: SocketAddr) -> Result<LocalGatewayHandle> {
+         .service(
+             OpenAIPassthroughService::builder()
+                 .client(http_client.clone())
++                // Symmetric override for the OpenAI Responses upstream
++                // (EDGEE_OPENAI_UPSTREAM); default = production OpenAI endpoints.
++                .config(openai_passthrough_config())
+                 .build(),
+         );
+ 
+@@ -141,3 +202,51 @@ pub fn init_file_tracing(log_path: &Path) -> anyhow::Result<()> {
+ 
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::Mutex;
++
++    // The config builders read process env; serialize the env-mutating tests so
++    // they can't observe each other's overrides.
++    static ENV_LOCK: Mutex<()> = Mutex::new(());
++
++    #[test]
++    fn anthropic_upstream_defaults_to_anthropic() {
++        let _g = ENV_LOCK.lock().unwrap();
++        std::env::remove_var(ANTHROPIC_UPSTREAM_ENV);
++        let cfg = anthropic_passthrough_config();
++        assert_eq!(cfg.base_url, AnthropicPassthroughConfig::DEFAULT_BASE_URL);
++    }
++
++    #[test]
++    fn anthropic_upstream_env_overrides_base_url() {
++        let _g = ENV_LOCK.lock().unwrap();
++        // A trailing slash is normalized away (the service appends /v1/messages,
++        // verified by gateway-core's own `target_uri_custom_base_url` test).
++        std::env::set_var(ANTHROPIC_UPSTREAM_ENV, "http://127.0.0.1:9123/");
++        let cfg = anthropic_passthrough_config();
++        std::env::remove_var(ANTHROPIC_UPSTREAM_ENV);
++        assert_eq!(cfg.base_url, "http://127.0.0.1:9123");
++    }
++
++    #[test]
++    fn anthropic_upstream_empty_env_is_ignored() {
++        let _g = ENV_LOCK.lock().unwrap();
++        std::env::set_var(ANTHROPIC_UPSTREAM_ENV, "   ");
++        let cfg = anthropic_passthrough_config();
++        std::env::remove_var(ANTHROPIC_UPSTREAM_ENV);
++        assert_eq!(cfg.base_url, AnthropicPassthroughConfig::DEFAULT_BASE_URL);
++    }
++
++    #[test]
++    fn openai_upstream_env_pins_both_endpoints() {
++        let _g = ENV_LOCK.lock().unwrap();
++        std::env::set_var(OPENAI_UPSTREAM_ENV, "http://127.0.0.1:9124");
++        let cfg = openai_passthrough_config();
++        std::env::remove_var(OPENAI_UPSTREAM_ENV);
++        assert_eq!(cfg.api_url, "http://127.0.0.1:9124/v1/responses");
++        assert_eq!(cfg.chatgpt_url, "http://127.0.0.1:9124/v1/responses");
++    }
++}

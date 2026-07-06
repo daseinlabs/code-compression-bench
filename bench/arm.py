@@ -1,0 +1,351 @@
+"""The Arm adapter contract + registry.
+
+An "arm" is one compression strategy. Every arm runs the SAME fixed agent
+scaffold against the SAME model; the only thing that varies is HOW the prompt
+is compressed before it reaches the model. There are exactly THREE adapter
+patterns, plus a no-op baseline:
+
+  (a) TransformArm  — rewrites the message array client-side, then the scaffold
+                      calls the model normally. The arm never sees the model.
+                      Hook: transform(messages) -> messages
+                      (e.g. bear: call a compress API on the array)
+
+  (b) ProxyArm      — routes the litellm model call through the arm's own
+                      OpenAI-compatible endpoint, which compresses server-side.
+                      The scaffold swaps base_url + headers and calls as usual.
+                      Hooks: model_base_url() -> str, headers() -> dict[str,str]
+                      (e.g. dasein hosted, edgee/rtk/headroom self-hosted)
+
+  (c) ToolArm       — attaches an MCP tool server and adjusts the agent's tool
+                      set; compression happens via tools the agent calls.
+                      Hook: attach() -> ToolAttach(tools, mcp_server_cmd)
+                      (e.g. woz: a Claude Code MCP server)
+
+The runner inspects `arm.kind` to decide which hook(s) to wire. An arm declares
+its identity (`name`, `kind`), the env keys it needs (`needs`), and a
+`ready()` check the runner calls before scheduling work for that arm.
+
+Concrete arm classes live in the top-level `arms/` package (one module per
+vendor); they subclass one of the bases below and register via @register.
+This module is pure stdlib and has NO knowledge of any specific vendor.
+"""
+
+from __future__ import annotations
+
+import abc
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Optional
+
+
+# ── message type (the OpenAI/litellm chat-message shape the scaffold passes) ──
+# A message is a plain dict: {"role": str, "content": str | list[dict], ...}.
+# Arms must preserve this shape. We alias it for signature clarity only.
+Message = dict
+Messages = list[Message]
+
+
+# ── stop-decision return type (the loop-stop hook contract) ──────────────────
+@dataclass
+class StopDecision:
+    """An arm's verdict when the agent tries to end its turn loop.
+
+    Returned by ``Arm.stop_decision`` and consulted by the runner's Stop hook
+    each time the agent would stop:
+
+      finalize=True   — let the loop END (the agent's work is accepted). The
+                        runner's Stop hook allows the stop.
+      finalize=False  — KEEP the loop going (CONTINUE). The runner's Stop hook
+                        BLOCKS the stop and feeds ``directive`` back to the agent
+                        as the reason it must continue (e.g. telling the agent
+                        its diff is incomplete).
+
+    ``directive`` is only meaningful when finalize is False; it is the steering
+    text the agent receives. Returning ``None`` from ``stop_decision`` (the
+    default) means the arm abstains and the loop stops normally.
+    """
+
+    finalize: bool
+    directive: Optional[str] = None
+
+
+# A PreToolUse rewrite/observation result. An arm's ``pre_tool_hook`` returns a
+# dict ``{"tool_input": {...}}`` to REWRITE the call's input, or None to leave the
+# call untouched (pure observation). The runner translates a returned tool_input
+# into the SDK's ``updatedInput`` PreToolUse output. Aliased for signature clarity.
+PreToolResult = Optional[dict]
+
+
+class ArmKind(str, Enum):
+    """Which adapter pattern an arm implements (selects the runner's wiring)."""
+
+    BASELINE = "baseline"      # no-op: messages and endpoint pass through unchanged
+    TRANSFORM = "transform"    # rewrites the message array client-side
+    PROXY = "proxy"            # routes the model call through the arm's endpoint
+    TOOL = "tool"              # attaches an MCP tool server / adjusts agent tools
+
+
+@dataclass
+class ToolAttach:
+    """What a ToolArm contributes to the scaffold for a run.
+
+    tools           : OpenAI-format tool/function specs to advertise to the model.
+                      For an MCP arm these are a DOCUMENTED FALLBACK only — the
+                      runner discovers the REAL tool schemas from the live
+                      ``tools/list`` of the spawned server and uses those; the
+                      static specs are advertised solely if discovery returns
+                      nothing.
+    mcp_server_cmd  : argv for the MCP stdio server to spawn (None if the arm uses
+                      a hosted/remote MCP, or loads a full plugin — see plugin_dir).
+                      The runner launches and tears this down.
+    plugin_dir      : path to a local Claude Code PLUGIN root to load via the SDK
+                      ``plugins=[{"type":"local","path":...}]``. When set, the runner
+                      loads the WHOLE plugin, so Claude Code activates the plugin's
+                      OWN subagents (e.g. Woz's haiku ``explore``), MCP server, hooks
+                      and skills — the real shipped product — INSTEAD of spawning a
+                      bare server and approximating its subagents. This is the
+                      faithful way to run a plugin-shaped arm (Woz); it supersedes
+                      mcp_server_cmd for that arm.
+    plugin_tool_globs: tool-name globs the plugin contributes that the agent must be
+                      allowed to call, e.g. ["mcp__plugin_woz_code__*"] (plugin name
+                      ``woz`` + MCP server name ``code``).
+    replace_tools   : if True, the agent works THROUGH the plugin's/arm's own tools:
+                      the runner drops the native file surface (Read/Edit/Write/
+                      Grep/Glob/...) so a Woz-style arm's tools are actually used,
+                      not bypassed. If False (default), they are advertised alongside.
+    server_env      : extra environment variables to pass to the spawned MCP
+                      server process (merged over a copy of os.environ). Secrets
+                      (API keys) and server config go HERE — never into argv, so
+                      they don't leak into process listings / logs. (Unused when a
+                      plugin is loaded: the plugin's own .mcp.json carries its env.)
+    """
+
+    tools: list[dict] = field(default_factory=list)
+    mcp_server_cmd: Optional[list[str]] = None
+    plugin_dir: Optional[str] = None
+    plugin_tool_globs: list[str] = field(default_factory=list)
+    replace_tools: bool = False
+    server_env: dict[str, str] = field(default_factory=dict)
+
+
+class Arm(abc.ABC):
+    """Base adapter every arm subclasses (indirectly, via one of the 3 patterns).
+
+    Identity / capability surface every arm MUST expose:
+      name  : str        — registry key (e.g. "bear", "edgee", "baseline")
+      kind  : ArmKind    — which adapter pattern (selects runner wiring)
+      needs : list[str]  — env var names this arm requires to run
+    """
+
+    name: str = "arm"
+    kind: ArmKind = ArmKind.BASELINE
+    needs: list[str] = []
+
+    def ready(self) -> tuple[bool, str]:
+        """Whether this arm can run now. Returns (ok, reason).
+
+        Default check: every env var in `needs` is present and non-empty.
+        Subclasses override for richer checks (e.g. ping a self-hosted proxy).
+        """
+        missing = [k for k in self.needs if not os.environ.get(k)]
+        if missing:
+            return False, f"missing env: {', '.join(missing)}"
+        return True, "ok"
+
+    def setup(self) -> None:
+        """Optional one-time prep before a batch of runs (e.g. warm a session).
+        No-op by default."""
+
+    def teardown(self) -> None:
+        """Optional cleanup after a batch of runs (e.g. close a session/MCP).
+        No-op by default."""
+
+    # ── OPTIONAL harness-level hooks (default no-ops) ────────────────────────
+    # These let an arm declare behaviour the Claude Agent SDK supports at the
+    # harness level — a turn-0 system-prompt injection, a PreToolUse rewrite, and
+    # a loop-stop decision — WITHOUT editing cc_runner's core. The runner wires
+    # whichever an arm overrides into ClaudeAgentOptions; arms that don't override
+    # them (baseline / proxy / woz) are wired EXACTLY as before. Keeping them on
+    # the base (not a mixin) means every pattern can opt in independently, so arm
+    # fixes that only touch their own module can proceed in parallel.
+
+    def step0_injection(self, instance: dict, repo_dir: str) -> Optional[str]:
+        """Text to prepend to the agent's FIRST turn (step 0).
+
+        Returned text is appended to Claude Code's system prompt for this solve
+        via ``ClaudeAgentOptions.system_prompt`` = a ``{"type":"preset",
+        "preset":"claude_code","append": <text>}`` preset, so it lands BEFORE the
+        task prompt and persists for the whole run. Use for a turn-0
+        brief injected before the task prompt.
+
+        ``instance`` is the SWE-bench instance dict (problem_statement + repo
+        info); ``repo_dir`` is the agent's cwd (the checked-out repo). Return
+        ``None`` (the default) to add nothing — the agent runs with the stock
+        Claude Code system prompt, unchanged.
+        """
+        return None
+
+    def pre_tool_hook(self, tool_name: str, tool_input: dict) -> PreToolResult:
+        """A PreToolUse hook: observe or REWRITE a tool call before it runs.
+
+        Called by the runner's PreToolUse hook for every tool the agent invokes,
+        with the tool's name and its parsed input dict. Return:
+
+          * a dict ``{"tool_input": {...new input...}}`` to REWRITE the call —
+            e.g. RTK rewriting ``Bash {"command":"git status"}`` to
+            ``Bash {"command":"rtk git status"}`` so the compressed wrapper runs;
+          * ``None`` (the default) to leave the call untouched (pure observation,
+            or a tool this arm doesn't intercept).
+
+        The runner translates a returned ``tool_input`` into the SDK's
+        ``updatedInput`` PreToolUse output and always ALLOWS the (possibly
+        rewritten) call — this hook routes/observes, it never blocks tools.
+        """
+        return None
+
+    def stop_decision(self, transcript_state: dict) -> Optional[StopDecision]:
+        """A loop-stop/continue decision consulted when the agent tries to stop.
+
+        Called by the runner's Stop hook each time the agent would end its turn
+        loop. ``transcript_state`` carries what the harness knows at that point
+        (e.g. ``{"stop_hook_active": bool, "session_id": str, "cwd": str}``);
+        arms read what they need and ignore the rest. Return:
+
+          * a ``StopDecision(finalize=True)`` to let the loop END;
+          * a ``StopDecision(finalize=False, directive=...)`` to KEEP going —
+            the runner BLOCKS the stop and feeds ``directive`` back to the agent
+            (e.g. a finalize vs continue-with-steering verdict);
+          * ``None`` (the default) to abstain — the loop stops normally.
+
+        The runner guards against infinite continuation: when the SDK reports the
+        stop is ALREADY a forced continuation (``stop_hook_active``), it lets the
+        loop stop regardless, so a buggy arm can't pin the agent forever.
+        """
+        return None
+
+    def has_harness_hooks(self) -> bool:
+        """Whether this arm overrides ANY of the optional harness-level hooks.
+
+        The runner uses this to decide if it must build a hooks/system-prompt
+        wiring at all (and to flip ``include_hook_events`` on). True iff at least
+        one of ``step0_injection`` / ``pre_tool_hook`` / ``stop_decision`` is
+        overridden away from the base no-op. Arms never need to override this.
+        """
+        return any(
+            getattr(type(self), name) is not getattr(Arm, name)
+            for name in ("step0_injection", "pre_tool_hook", "stop_decision")
+        )
+
+
+# ── pattern (a): client-side message transform ──────────────────────────────
+class TransformArm(Arm):
+    """Rewrites the message array before the scaffold calls the model.
+
+    The runner calls `transform(messages)` and passes the result to the model
+    via the normal (un-proxied) endpoint. Implementations should be PURE w.r.t.
+    the model call — no side effects on the returned list's caller.
+    """
+
+    kind = ArmKind.TRANSFORM
+
+    @abc.abstractmethod
+    def transform(self, messages: Messages) -> Messages:
+        """Return a (compressed) message array of the same chat-message shape."""
+        raise NotImplementedError
+
+
+# ── pattern (b): proxy the model call through the arm's endpoint ─────────────
+class ProxyArm(Arm):
+    """Routes the model call through the arm's OpenAI-compatible endpoint.
+
+    The runner builds the litellm call with base_url = model_base_url() and the
+    arm's headers() merged in. The arm's endpoint compresses server-side and
+    forwards to the underlying model. Messages are NOT transformed client-side.
+    """
+
+    kind = ArmKind.PROXY
+
+    @abc.abstractmethod
+    def model_base_url(self) -> str:
+        """The OpenAI-compatible base URL the runner points litellm at."""
+        raise NotImplementedError
+
+    def headers(self) -> dict[str, str]:
+        """Extra HTTP headers for the proxied call (e.g. Authorization).
+        Empty by default (self-hosted proxies often need none)."""
+        return {}
+
+
+# ── pattern (c): attach an MCP tool server / adjust the agent's tools ────────
+class ToolArm(Arm):
+    """Attaches an MCP tool server and/or adjusts the agent's tool set.
+
+    The runner calls `attach()` once per run, wires the returned tools into the
+    scaffold, spawns mcp_server_cmd if present, and tears it down after.
+    """
+
+    kind = ArmKind.TOOL
+
+    @abc.abstractmethod
+    def attach(self) -> ToolAttach:
+        """Return the tools + optional MCP server command for this arm."""
+        raise NotImplementedError
+
+
+# ── no-op baseline (the control) ─────────────────────────────────────────────
+class BaselineArm(Arm):
+    """The control arm: no compression. Messages and endpoint pass through.
+
+    Treated by the runner as a transform that returns its input unchanged, so
+    the same call path is exercised as the other arms (only the layer differs).
+    Always ready (needs nothing).
+    """
+
+    name = "baseline"
+    kind = ArmKind.BASELINE
+    needs: list[str] = []
+
+    def transform(self, messages: Messages) -> Messages:
+        return messages
+
+
+# ── registry ──────────────────────────────────────────────────────────────
+_REGISTRY: dict[str, Callable[[], Arm]] = {}
+
+
+def register(name: str) -> Callable[[Callable[[], Arm]], Callable[[], Arm]]:
+    """Class/factory decorator: register an Arm factory under `name`.
+
+    Usage:
+        @register("bear")
+        class BearArm(TransformArm):
+            name = "bear"
+            ...
+    """
+
+    def deco(factory: Callable[[], Arm]) -> Callable[[], Arm]:
+        key = name.lower()
+        if key in _REGISTRY:
+            raise ValueError(f"arm already registered: {name}")
+        _REGISTRY[key] = factory
+        return factory
+
+    return deco
+
+
+def get_arm(name: str) -> Arm:
+    """Instantiate the registered arm by name. Raises KeyError if unknown."""
+    key = name.lower()
+    if key not in _REGISTRY:
+        raise KeyError(f"unknown arm '{name}'. registered: {available_arms()}")
+    return _REGISTRY[key]()
+
+
+def available_arms() -> list[str]:
+    """Sorted list of registered arm names."""
+    return sorted(_REGISTRY)
+
+
+# register the built-in control
+register("baseline")(BaselineArm)

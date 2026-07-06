@@ -1,0 +1,312 @@
+# Arms — how to run & self-host each compression layer
+
+Every arm runs the **same** agent scaffold against the **same** model
+(`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `MODEL` from `.env`). Only the
+compression layer differs. There are three adapter patterns:
+
+| pattern | what it does | hook |
+|---|---|---|
+| **TransformArm** | rewrites the message array client-side, then the scaffold calls the model normally | `transform(messages) -> messages` |
+| **ProxyArm** | routes the litellm call through the arm's own OpenAI-compatible endpoint (compresses server-side) | `model_base_url()`, `headers()` |
+| **ToolArm** | attaches an MCP tool server / adjusts the agent's tools | `attach() -> ToolAttach` |
+
+List registered arms: `python -c "import arms, bench.arm as a; print(a.available_arms())"`
+Check readiness: each arm's `.ready()` returns `(ok, reason)` based on its `needs` env vars.
+
+---
+
+## baseline (control) — no compression
+Built in (`bench.arm.BaselineArm`), always ready, needs nothing. `transform` returns the
+messages unchanged so the same call path is exercised as every other arm.
+
+## dasein — hosted Dasein compression service (ProxyArm + harness hooks)
+The Dasein arm is a thin over-the-wire client to a hosted compression service; this repo contains no
+vendor internals. Under Claude Code it runs across two seams. The PROXY seam is server-side: the
+Dasein service speaks the native Anthropic Messages API, processes each turn, and forwards to the
+run gateway. The HARNESS-HOOK seam runs the two agent-loop-owned parts a passive proxy can't: the
+arm overrides `step0_injection` (an optional turn-0 brief) and `stop_decision` (an optional stop
+verdict — finalize or continue), which `cc_runner._build_harness_hooks` wires into the SDK
+(system-prompt append at step 0; a Stop hook for loop control). Both hooks shell out to the
+service's hook-runner CLI and fail open.
+
+- **Env:**
+  - `DASEIN_API_KEY`, `DASEIN_BASE_URL` (**required**) — the hosted service.
+  - `DASEIN_HOOK_CMD` (**required for the step0/stop hooks**) — argv for the hosted service's
+    hook-runner CLI on the runner box. The arm SHELLS OUT to it (clean-room: the public repo never
+    imports any vendor internals). Unset -> proxy-only; the hooks fail OPEN, never crashing a paid run.
+  - `DASEIN_HOOK_TIMEOUT_S` (optional, default 300) — per-hook subprocess timeout.
+- **Run:** set the env, then `make bench ARM=dasein`. No local model service to launch.
+- **Topology:** Claude Code points `ANTHROPIC_BASE_URL` at `DASEIN_BASE_URL`; the Dasein service's
+  OWN upstream (`DASEIN_UPSTREAM_BASE`) must be this run's gateway URL (the runner prints it), so
+  the chain is `Claude Code -> Dasein (compresses) -> gateway -> Vertex`. The Dasein service
+  authenticates its own key and is configured (at provisioning) with the gateway as upstream;
+  Claude Code talks native Anthropic to Dasein directly. The arm forwards `CCB_RUN_ID` (and Claude
+  Code forwards `x-ccb-run-id` on every request), so the service keys one live session per run.
+
+## woz — WOZCODE Claude Code plugin loaded whole (ToolArm, paid)
+Woz is a paid Claude Code **plugin** ([github.com/WithWoz/wozcode-plugin](https://github.com/WithWoz/wozcode-plugin),
+plugin name `woz`). It does **not** compress the prompt stream or proxy the model — it changes
+the agent's **tools**. The arm loads the **WHOLE plugin** via the Claude Agent SDK
+`ClaudeAgentOptions(plugins=[{"type":"local","path":WOZ_PLUGIN_DIR}])`, so Claude Code activates
+Woz's OWN shipped definitions: its `code` main subagent + `explore` **haiku** subagent (with
+Woz's Search/Sql tools and a terse `Defs:/Refs:/Callers:` brief), its `code` MCP server (tools
+surfaced as `mcp__plugin_woz_code__*`), and its session hooks/skills. We do **not** spawn a bare
+server or reconstruct the explorer — that would measure an approximation, not Woz. The lever is
+the tool surface itself: one `Search` call discovers + greps + reads in a single round-trip; one
+`Edit` applies many edits; `output_mode`/line caps/`if_modified_since`/`summary` shape bounded
+observations. Sharper tools → shorter tool calls → a smaller transcript across turns. That
+indirect effect is the whole compression mechanism. See `arms/woz.py` (`WozArm.attach()`) and
+`bench/cc_runner.py` (`build_arm_config`, the TOOL branch + `plugins=`).
+
+**`replace_tools=True`** makes the runner drop the native file surface on the main thread
+(`_PLUGIN_NATIVE_DISALLOWED` = Read/Edit/Write/Grep/Glob/MultiEdit/NotebookEdit — reproducing
+Woz's `agents/code.md` `disallowedTools` exactly), so the run genuinely works **through** Woz's
+tools, with no native fallback by design: if the plugin's tools don't load (or have no session),
+the run produces nothing, which **surfaces** the failure rather than silently measuring the
+native agent. The plugin's real tool schemas come from the loaded plugin itself — nothing here is
+hand-mirrored or hardcoded.
+
+**Auth = a one-time CLI login, NOT a server env var.** Forwarding `WOZ_API_KEY` to the MCP server
+as an env var yields `auth.login_required`. The real flow stores a session under
+`~/.claude/wozcode/`: `WozArm.setup()` runs
+`<node> <WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js login --token "$WOZ_API_KEY"` once (key via the
+subprocess **environment**, never argv); the plugin's `code` MCP server then serves `Search`
+against that stored session. A WOZCODE session is minted by the browser `/woz-login` flow; a
+website `{refreshToken, organizationId}` token that has gone stale will **not** authenticate (the
+CLI prints `WozCode session is stale`) and no session file is written — re-run the browser
+`/woz-login` to mint a fresh one, then login (or copy `~/.claude/wozcode/`) onto the runner.
+
+> **⚠️ `WOZ_API_KEY` is a SHORT-LIVED website token, not a durable license key.** It is a
+> `{refreshToken, organizationId}` blob minted by the browser `/woz-login` flow, and it
+> **expires / gets server-revoked** — so it must be **periodically re-minted** by a human.
+> `setup()`/`ready()` **detect a stale-or-absent session and SKIP the arm cleanly** (so a
+> sessionless woz never gets scheduled and dies as an `auth.login_required` infra failure for
+> every task), but they **cannot self-heal it**: re-running `login --token <stale>` with the same
+> revoked token just reprints `WozCode session is stale` and writes nothing. When that happens,
+> `setup()` raises **`WozStaleSessionError`** (a `WozLoginError` subclass — the arm still fails
+> closed, the runner's arm-setup-error → infra-error mapping is unchanged) whose message names the
+> actionable cause so the operator sees it immediately. **To recover:** (a) complete `/woz-login`
+> in a browser to mint a fresh `{refreshToken, organizationId}`; (b) run
+> `wozcode-cli.js login --token <fresh>` on the runner (or copy a logged-in `~/.claude/wozcode/`
+> onto it); (c) update `WOZ_API_KEY` in `.env`/`api_key_dump.txt`. **Headless tip:** the
+> browser-login CLI starts a *loopback-only* callback server on the runner (e.g.
+> `http://localhost:<port>`); a raw IAP **TCP** tunnel to that port is **blocked** by the IAP
+> firewall (only SSH/22 is open → `4003 failed to connect to backend`), so bridge it with an **SSH
+> local port-forward over the existing port-22 IAP tunnel** instead:
+> `gcloud compute ssh <runner> --tunnel-through-iap --ssh-flag="-L <port>:localhost:<port>" --ssh-flag="-N"`,
+> then open the printed `app.wozcode.com/wozcode/auth?callback_port=<port>&...` URL in a browser
+> where you're signed into WOZCODE — the post-login redirect to `localhost:<port>` rides the
+> forward back to the runner's callback server and writes `~/.claude/wozcode/auth.json`.
+
+- **What it is:** paid Claude Code plugin loaded via SDK `plugins=[...]` (real `code`/`explore`
+  subagents + `code` MCP server). Not self-host/free, not a bare MCP server, not a stub.
+- **Env** (mirrors `.env.example`):
+  - `WOZ_API_KEY` (license/account key, **required**) — used by `setup()` for the one-time login
+    (passed via the subprocess environment, never argv); **not** forwarded as the server's auth.
+  - `WOZ_PLUGIN_DIR` (**required**) — path to a clone of the plugin on the runner box; the runner
+    loads this whole dir as a plugin. Must contain `.claude-plugin/plugin.json` +
+    `agents/explore.md`; the login CLI is `<WOZ_PLUGIN_DIR>/scripts/wozcode-cli.js`.
+  - `WOZ_NODE` (optional) — pin a `node` binary (must be **>= 20.12**: the plugin server imports
+    `util.styleText`, added in Node 20.12; default: `node` on `PATH`). Claude Code spawns the
+    plugin's MCP server with the system `node`, which must also be >= 20.12.
+- **Setup on the runner box (Linux):**
+  ```sh
+  git clone https://github.com/WithWoz/wozcode-plugin "$WOZ_PLUGIN_DIR"
+  cd "$WOZ_PLUGIN_DIR" && npm ci   # build the native addon — see the note below
+  ```
+  Node.js >= 20.12 is required. The plugin ships a **platform-specific native addon**
+  (`build/Release/queryparser.node` / a `node-gyp` build). It is **not** portable from this
+  Windows dev box — it must be built/run on the **Linux runner** (matching node ABI + arch).
+- **Run:** `WOZ_API_KEY=... WOZ_PLUGIN_DIR=/clones/wozcode-plugin make bench ARM=woz`.
+- **`ready()`** requires `WOZ_API_KEY`, the plugin tree on disk
+  (`.claude-plugin/plugin.json` + `agents/explore.md`), a resolvable `node` >= 20.12, **and a
+  VALID login session** — it runs `wozcode-cli.js status` and SKIPs with a precise, actionable
+  reason when the login is **stale or absent** (so a sessionless woz never gets scheduled and then
+  dies as an `auth.login_required` infra failure for every task; native file tools are disallowed,
+  so without a session the agent has no working tools). Set `WOZ_SKIP_SESSION_CHECK=1` only when a
+  valid session is proven out-of-band.
+
+## bear — The Token Company API (TransformArm)
+Calls bear's compress API on the message array (`target_ratio = COMPRESSION_TARGET_RATIO`,
+default `0.5`), then the scaffold calls the model normally.
+
+- **Env:** `BEAR_API_KEY`, `BEAR_BASE_URL`, `COMPRESSION_TARGET_RATIO`.
+- **Run:** set env, then `make bench ARM=bear`. On any API error the arm degrades to
+  identity (returns the input messages unchanged) so a hiccup never drops the prompt.
+
+## rtk — rtk-ai/rtk CLI binary, run as a PreToolUse HOOK (not a proxy)
+**rtk is NOT a proxy.** [rtk-ai/rtk](https://github.com/rtk-ai/rtk) ("Rust Token Killer") is a
+single Rust CLI binary that compresses **shell-command stdout** by 60–90% — it has no `serve`
+mode, no `--upstream`, and never sits on the model endpoint. It integrates with Claude Code
+**only** as a **PreToolUse hook** that rewrites Bash commands before they run (its own installer,
+`rtk init -g`, writes exactly this hook): `git status` → `rtk git status`, so the `rtk` wrapper
+runs the command and emits *compressed* output into context. The native `Read`/`Grep`/`Glob`
+tools **bypass** it (rtk only touches the shell boundary).
+
+In the bench, `RtkArm` is a **hook arm** (`bench.arm.Arm`, `kind = BASELINE` so the model goes
+**straight to the gateway like A0**). It overrides `pre_tool_hook(tool_name, tool_input)`: for a
+`tool_name == "Bash"` call it **delegates the rewrite decision to the product's OWN rewriter** —
+it shells out to `rtk rewrite -- <cmd>` (since v0.24.0 the binary's *"single source of truth for
+hooks"*, the exact subcommand rtk's installed `~/.claude/hooks/rtk-rewrite.sh` calls) and uses its
+**stdout verbatim** as the new command (`{"tool_input": {...command: <rtk's rewrite>...}}`).
+`rtk rewrite` prints the rewritten command if rtk has an equivalent and **prints nothing** if it
+doesn't, so the arm gates on **stdout, not the exit code** (rtk sets a non-zero code for the
+rewritten case by design, matching the product hook `REWRITTEN=$(rtk rewrite "$CMD") || exit 0`):
+non-empty/different stdout ⇒ rewrite, empty/unchanged stdout ⇒ `None` (leave the call untouched).
+
+This means the bench wraps rtk's **full 100+ command set** and inherits rtk's own
+command-detection — including remaps the agent never sees as a bare prefix (`cat file.txt` →
+`rtk read file.txt`) and **pipe / `&&`-chain / env-prefix** handling (`git status | head` →
+`rtk git status | head`; `cargo test && git push` → `rtk cargo test && rtk git push`;
+`FOO=bar git status` → `FOO=bar rtk git status`). It is **not** a Python re-implementation of
+rtk's trigger logic: an earlier version hand-curated a ~30-command set + a `_first_token` parser
+and prepended a bare `rtk `, which **under-wrapped** (it missed `cat`→`read`, keyed multiword forms
+on the first token only, and no-opped entirely on any pipe/chain/subshell/env-prefix) — so the
+agent's transcript saw *less* rtk compression than the real `rtk init -g` hook produces,
+mis-measuring rtk's token win. Delegating to `rtk rewrite` eliminates that approximation. The
+bash builtin `read` (the agent uses the native `Read` tool) and rtk's own subcommand verbs are
+excluded **because the product's own `rtk rewrite` returns nothing for them**, not by a Python
+opt-out — faithful by construction. The runner's PreToolUse capability turns the returned
+`tool_input` into the SDK's `updatedInput` (see `bench/cc_runner.py::_build_harness_hooks` +
+`tests/test_harness_hooks.py::RewriteArm`).
+
+- **The product is the binary — install it on the runner box (any one):**
+  ```sh
+  brew install rtk
+  # or
+  curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+  # or
+  cargo install --git https://github.com/rtk-ai/rtk
+  ```
+- **Provisioning gotcha — the binary must be on the RUNNER PROCESS's PATH, not just a login shell.**
+  The panel launch is a **non-interactive** `gcloud compute ssh <runner> --command '<…>'`, which does
+  NOT source `.bashrc`/`.profile`, so a binary under `~/.local/bin` is **invisible** to the worker
+  (`which rtk` ⇒ none ⇒ `ready()` SKIPs the arm and it runs nothing). Provision it onto a **system**
+  PATH dir that the non-interactive shell already has (`/usr/local/bin`), e.g. `selfhost/cc_setup.sh`
+  symlinks `~/.local/bin/rtk` → `/usr/local/bin/rtk`. As a belt-and-suspenders, the box `.env` also
+  pins `RTK_BIN=/usr/local/bin/rtk` (loaded via dotenv in `main()`), so both `ready()` and the
+  rewrite resolve the absolute path even without the symlink. Confirm under the **exact** launch form:
+  `gcloud … --command '<bench>/.venv/bin/python -c "from arms.rtk import RtkArm; print(RtkArm().ready())"'`
+  must print `(True, …)` before scheduling.
+- **Env:** none strictly required. Optional `RTK_BIN` pins the binary's absolute path (recommended on
+  the runner so a non-login process resolves it; default `rtk` on `PATH`).
+- **`ready()`** runs `rtk --version` (`shutil.which('rtk')` + an absolute-path fallback + a version
+  probe) **and then smokes the real integration path** — `rtk rewrite -- 'git status'` must emit an
+  `rtk …`-wrapped command. The second check catches a **legacy < 0.24.0** binary whose `--version`
+  passes but which lacks the `rewrite` subcommand the hook relies on (it would silently never
+  compress); `ready()` **SKIPs** with a precise reason naming the **≥ 0.24.0** requirement if so.
+  This mirrors how `woz.ready()` gates on the real login session, not just node presence. There is
+  **no** proxy and **no** `RTK_BASE_URL` to provision.
+- **Run:** install the binary, then `make bench ARM=rtk`. The KPI path is unchanged: because the
+  rewritten (smaller) Bash output is what accrues in context, the usage gateway bills the **real
+  post-compression** tokens. The chain log shows the gateway-direct form
+  (`chain [rtk]: ClaudeCode -> <gateway> (gateway) -> Vertex`), and a Bash call in the trajectory
+  shows the `rtk ` prefix.
+
+## edgee / headroom — self-hosted open-source proxies (ProxyArm)
+Each is an Anthropic-API-speaking compression proxy you run locally; it compresses the prompt
+and forwards to **its configured upstream — which MUST be this run's gateway**. The arm only
+points Claude Code's `ANTHROPIC_BASE_URL` at the local proxy; the proxy holds no model key
+(the gateway, below it, bridges to Vertex via ADC).
+
+### Topology (the single bottom bridge)
+The usage gateway is the **single bottom bridge to Vertex** (claude-sonnet on Vertex via
+litellm + ADC). The full chain for a proxy arm is:
+
+```
+Claude Code  ──(ANTHROPIC_BASE_URL = <ARM>_BASE_URL)──>  vendor proxy (compresses)
+             ──(vendor's UPSTREAM = the gateway URL)──>  gateway  ──>  Vertex
+```
+
+The gateway sits at the bottom, so it captures the **real post-compression usage** (cache
+split included). **Per-vendor upstream config (provisioning requirement):** each vendor proxy
+must be told to forward to the gateway URL the runner prints per run
+(`its UPSTREAM must be http://127.0.0.1:<port>`). Where to set it:
+
+| arm | where the vendor's upstream is configured |
+|---|---|
+| **edgee** | `EDGEE_ANTHROPIC_UPSTREAM=<gateway_url>` on the forked `edgee local-gateway` (the patch wires this env var into the Anthropic passthrough's `with_base_url`; see `selfhost/edgee/`). Launch: `GATEWAY_URL=<gateway_url> EDGEE_PORT=8787 bash selfhost/edgee/launch.sh` |
+| **headroom** | `ANTHROPIC_TARGET_API_URL` (or the `--anthropic-api-url` flag) on `headroom proxy --port 8787 --mode token --anthropic-api-url <gateway>` — Anthropic-native upstream, NOT LiteLLM |
+| **compresr** | `ANTHROPIC_PROVIDER_URL=<gateway_url>` set ON THE COMPRESR PROCESS (the Context Gateway's upstream-redirect var; see `internal/gateway/providers.go`) — Claude Code points `COMPRESR_GATEWAY_URL=http://127.0.0.1:18081` at the gateway |
+
+> **rtk is not in this table** — it is a hook arm (see its section above), not a proxy: there is
+> no upstream to configure, and the model goes straight to the gateway like the baseline.
+
+We do **not** set `CLAUDE_CODE_USE_VERTEX` and we do **not** inject the arm's `headers()`:
+Claude Code speaks the Anthropic API straight to the vendor proxy, so any vendor auth lives
+**on the vendor proxy** (configured at provisioning), and Vertex auth is **ADC on the box**
+held by the gateway.
+
+- **Env (defaults):** `EDGEE_BASE_URL=http://127.0.0.1:8787` (edgee local-gateway's real
+  default port), `HEADROOM_BASE_URL=http://127.0.0.1:8787` (also Headroom's real default).
+  Both real defaults are 8787 — harmless because vendor arms run **one at a time**; set
+  `EDGEE_PORT`/`EDGEE_BASE_URL` (or `--port`) if you ever co-locate them.
+- **Launch headroom:** `make selfhost-up` (wraps `docker compose -f selfhost/docker-compose.yml up -d`).
+- **Launch edgee:** build the fork once (`bash selfhost/edgee/build.sh`), then per run
+  `GATEWAY_URL=<gateway_url> EDGEE_PORT=8787 bash selfhost/edgee/launch.sh`.
+- **Stop:** `make selfhost-down` (headroom).
+- **Per-project setup notes:**
+  - **edgee** — open-source Rust CLI (`edgee-ai/edgee`), **Anthropic-native**. Its
+    `edgee local-gateway` routes `POST /v1/messages` through the real Anthropic passthrough +
+    Claude `CompressionLayer` (content blocks / `tool_use` / `tool_result` / `cache_control`
+    pass through unchanged). Upstream Anthropic was hardcoded to `api.anthropic.com`; the
+    fork in `selfhost/edgee/` (`anthropic_upstream.patch`, pinned to edgee-cli 0.2.9) wires
+    the already-present `with_base_url` override into `start()` from `EDGEE_ANTHROPIC_UPSTREAM`,
+    so it forwards to the run gateway instead. Build/launch via `selfhost/edgee/build.sh` +
+    `launch.sh` — NOT Docker (the `edgee/edgee:latest` image was fictitious and has been dropped).
+  - **headroom** — open-source, **Anthropic-native**, reversible compression
+    (github.com/chopratejas/headroom, PyPI `headroom-ai`). Its proxy natively speaks the
+    Anthropic Messages API at `/v1/messages`, so Claude Code talks to it directly. Either run
+    the container in `selfhost/docker-compose.yml` or self-host the CLI:
+    `pip install "headroom-ai[all]"` then
+    `headroom proxy --port 8787 --mode token --anthropic-api-url <gateway>`. Point
+    `HEADROOM_BASE_URL` at it (default `http://127.0.0.1:8787`) and set its UPSTREAM Anthropic
+    endpoint to the gateway URL via `ANTHROPIC_TARGET_API_URL` (or the `--anthropic-api-url`
+    flag) — NOT a LiteLLM upstream.
+
+> The compose file ships **skeleton** services (placeholder `image:` tags marked `TODO`).
+> Replace each with the project's real published image or a `build:` context before
+> `make selfhost-up`.
+
+## compresr — Context Gateway (ProxyArm)
+Compresr's [Context Gateway](https://github.com/Compresr-ai/Context-Gateway) (compresr.ai,
+YC W2026; **Go**, Apache-2.0) is an open-source **Anthropic-native** reverse proxy that
+compacts conversation history + tool outputs before they reach the model. It detects format
+and routes `/v1/messages`-shaped Anthropic traffic, so Claude Code's content blocks /
+`tool_use` / `tool_result` / `cache_control` pass through unchanged. The documented Claude
+Code path is exactly `ANTHROPIC_BASE_URL=http://localhost:18081 claude` — no client-side
+translation. In the bench `CompresrArm` is a **ProxyArm**: it points Claude Code's
+`ANTHROPIC_BASE_URL` at the local gateway and injects **no** client header.
+
+- **Env:** `COMPRESR_GATEWAY_URL` — base URL of the local Context Gateway Claude Code points at
+  (default `http://127.0.0.1:18081`, the product's real default port; the old `8804` was an
+  audit gap). This is the **only** var the arm reads.
+- **Launch (self-host):** run the Go gateway on `GATEWAY_PORT` (= `18081`) — build/run
+  `Compresr-ai/Context-Gateway` (e.g. `go run ./cmd/...` with `cmd/configs/fast_setup.yaml`, or
+  its container). `ready()` does a real TCP probe of `COMPRESR_GATEWAY_URL` and **SKIPs** with a
+  precise reason if the gateway is not listening, so a dead/un-launched gateway never burns a
+  paid run.
+- **Upstream (provisioning requirement):** the gateway's **UPSTREAM Anthropic endpoint** must
+  be THIS run's gateway, set via **`ANTHROPIC_PROVIDER_URL=<gateway_url>` ON THE COMPRESR
+  PROCESS** (its real upstream-redirect var; default `https://api.anthropic.com` — matches
+  `internal/gateway/providers.go`). The runner prints the gateway URL per run. Chain:
+  `Claude Code -> Compresr (compacts) -> gateway -> Vertex`.
+- **Auth — no client bearer.** The gateway uses Claude Code's own auth (`skip_api_key_setup`
+  → Claude Code's bridge token passes straight through), so the arm sends no header.
+  `COMPRESR_BASE_URL` / `COMPRESR_API_KEY` in the real product are the **compression-SERVICE**
+  creds (the gateway's call OUT to `https://api.compresr.ai`) and are configured **ON THE
+  GATEWAY**, never sent by the client — so this arm holds no key.
+- **COST CAVEAT (measurement):** Compresr's preemptive summarizer itself calls an LLM
+  (`claude-haiku-4-5`) by egressing to `api.compresr.ai`. That leg does **NOT** pass through
+  the bottom-bridge usage gateway, so its tokens/cost are **NOT** captured in this arm's usage
+  rows — note it when reading Compresr's cost numbers.
+- **Run:** launch the gateway (with `ANTHROPIC_PROVIDER_URL=<gateway_url>`), then
+  `COMPRESR_GATEWAY_URL=http://127.0.0.1:18081 make bench ARM=compresr`.
+
+---
+
+### Adding a new arm
+1. Create `arms/<name>.py`, subclass one of the three patterns, set `name`/`needs`,
+   and decorate the class with `@bench.arm.register("<name>")`.
+2. Import it in `arms/__init__.py` so registration runs when the package is imported.
+3. Add its env vars to `.env.example`.

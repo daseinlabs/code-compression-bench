@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-compression-bench"
+version = "0.1.0"
+description = "A clean-room industry benchmark for LLM prompt-compression layers on coding agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Dasein Labs", email = "hello@daseinlabs.ai" }]
+
+# The fixed agent is headless Claude Code (Python Claude Agent SDK). The model is
+# claude-sonnet on Vertex, reached through the internal usage gateway, which now
+# forwards NATIVELY via the anthropic SDK's AnthropicVertex client (ADC auth) — a
+# pure Anthropic-Messages passthrough, no litellm translation. (litellm remains
+# only for the legacy bench.runner path; the gateway no longer needs it.)
+# datasets resolves SWE-bench instances; swebench is the grader.
+dependencies = [
+    "claude-agent-sdk>=0.1",
+    "anthropic[vertex]>=0.40",
+    "litellm>=1.50",
+    "google-cloud-aiplatform>=1.60",
+    "google-auth>=2.30",
+    "datasets>=2.20",
+    "swebench>=2.0",
+    "matplotlib>=3.8",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+analysis = ["pandas>=2.2"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://daseinlabs.ai"
+
+[tool.setuptools]
+packages = ["bench", "arms"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
