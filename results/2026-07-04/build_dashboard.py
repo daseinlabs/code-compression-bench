@@ -11,7 +11,7 @@ A = D["arms"]
 P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 html = open(P).read()
 
-STYLE = {"dasein": ('Dasein', "#10b981", "#047857"), "A0": ('Baseline', "#64748b", "#334155"),
+STYLE = {"dasein": ('Parsec', "#10b981", "#047857"), "A0": ('Baseline', "#64748b", "#334155"),
          "woz": ('Woz', "#8b9bc4", "#5f6f9c"), "headroom": ('Headroom', "#c9a26b", "#a07f47"),
          "rtk": ('RTK', "#b48ab8", "#8c6690")}
 
@@ -55,7 +55,7 @@ for k in ("dasein", "woz", "rtk", "headroom"):
     rows.append('      <tr><td>%s</td><td class="claim">%s</td><td class="obs">%s</td></tr>'
                 % (STYLE[k][0], claim, obs))
 new_tbody = "<tbody>\n" + "\n".join(rows) + "\n    </tbody>"
-html = re.sub(r"<tbody>\s*<tr><td>Dasein</td>.*?</tbody>", new_tbody, html, flags=re.S)
+html = re.sub(r"<tbody>\s*<tr><td>(?:Dasein|Parsec)</td>.*?</tbody>", new_tbody, html, flags=re.S)
 
 # ── 3. de-conclusory subtitles (plain metric descriptions) ──────────────────
 html = html.replace("Pick a KPI to compare across arms; the bars re-sort best to worst.",

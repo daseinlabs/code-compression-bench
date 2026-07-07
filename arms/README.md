@@ -19,10 +19,10 @@ Check readiness: each arm's `.ready()` returns `(ok, reason)` based on its `need
 Built in (`bench.arm.BaselineArm`), always ready, needs nothing. `transform` returns the
 messages unchanged so the same call path is exercised as every other arm.
 
-## dasein — hosted Dasein compression service (ProxyArm + harness hooks)
-The Dasein arm is a thin over-the-wire client to a hosted compression service; this repo contains no
+## dasein — hosted Parsec compression service (ProxyArm + harness hooks)
+The Parsec arm is a thin over-the-wire client to a hosted compression service; this repo contains no
 vendor internals. Under Claude Code it runs across two seams. The PROXY seam is server-side: the
-Dasein service speaks the native Anthropic Messages API, processes each turn, and forwards to the
+Parsec service speaks the native Anthropic Messages API, processes each turn, and forwards to the
 run gateway. The HARNESS-HOOK seam runs the two agent-loop-owned parts a passive proxy can't: the
 arm overrides `step0_injection` (an optional turn-0 brief) and `stop_decision` (an optional stop
 verdict — finalize or continue), which `cc_runner._build_harness_hooks` wires into the SDK
@@ -36,11 +36,11 @@ service's hook-runner CLI and fail open.
     imports any vendor internals). Unset -> proxy-only; the hooks fail OPEN, never crashing a paid run.
   - `DASEIN_HOOK_TIMEOUT_S` (optional, default 300) — per-hook subprocess timeout.
 - **Run:** set the env, then `make bench ARM=dasein`. No local model service to launch.
-- **Topology:** Claude Code points `ANTHROPIC_BASE_URL` at `DASEIN_BASE_URL`; the Dasein service's
+- **Topology:** Claude Code points `ANTHROPIC_BASE_URL` at `DASEIN_BASE_URL`; the Parsec service's
   OWN upstream (`DASEIN_UPSTREAM_BASE`) must be this run's gateway URL (the runner prints it), so
-  the chain is `Claude Code -> Dasein (compresses) -> gateway -> Vertex`. The Dasein service
+  the chain is `Claude Code -> Parsec (compresses) -> gateway -> Vertex`. The Parsec service
   authenticates its own key and is configured (at provisioning) with the gateway as upstream;
-  Claude Code talks native Anthropic to Dasein directly. The arm forwards `CCB_RUN_ID` (and Claude
+  Claude Code talks native Anthropic to Parsec directly. The arm forwards `CCB_RUN_ID` (and Claude
   Code forwards `x-ccb-run-id` on every request), so the service keys one live session per run.
 
 ## woz — WOZCODE Claude Code plugin loaded whole (ToolArm, paid)

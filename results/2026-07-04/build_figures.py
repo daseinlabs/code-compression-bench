@@ -30,7 +30,7 @@ COL = {"dasein": HERO, "A0": SLATE, "woz": "#8b9bc4", "headroom": "#c9a26b", "rt
 EDGE = {"dasein": HERO_DARK, "A0": SLATE_DK, "woz": "#5f6f9c", "headroom": "#a07f47", "rtk": "#8c6690"}
 INK = "#1e293b"; INK_SOFT = "#64748b"; GRID = "#e6ebf1"
 BAD = "#d98a8a"; BAD_DK = "#b04a4a"
-LABEL = {"dasein": "Dasein", "A0": "Baseline", "woz": "Woz", "headroom": "Headroom", "rtk": "RTK"}
+LABEL = {"dasein": "Parsec", "A0": "Baseline", "woz": "Woz", "headroom": "Headroom", "rtk": "RTK"}
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -358,7 +358,7 @@ def fig_cost_time():
     ax.grid(True, color=GRID, linewidth=1, zorder=0); ax.set_axisbelow(True)
     frame(ax); ax.spines["left"].set_visible(True); ax.spines["left"].set_color("#cbd5e1")
     titleblock(fig, "Cost savings versus time savings",
-               "Both measured against the no-compression baseline; up and right is better. Dasein is the only arm that saves on both.")
+               "Both measured against the no-compression baseline; up and right is better. Parsec is the only arm that saves on both.")
     footer(fig)
     fig.savefig(os.path.join(OUT, "10_cost_vs_time.png")); plt.close(fig)
 

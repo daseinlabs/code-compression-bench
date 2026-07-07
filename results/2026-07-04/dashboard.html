@@ -77,7 +77,7 @@
   <h2>Leaderboard</h2>
   <p class="h2sub">Ranked by cost per solved task — cache-aware total cost ÷ Docker-graded solves. Click any column header to sort.</p>
   <div class="legend">
-    <span><i class="sw" style="background:#10b981"></i>Dasein</span>
+    <span><i class="sw" style="background:#10b981"></i>Parsec</span>
     <span><i class="sw" style="background:#64748b"></i>Baseline</span>
     <span><i class="sw" style="background:#8b9bc4"></i>Woz</span>
     <span><i class="sw" style="background:#c9a26b"></i>Headroom</span>
@@ -137,7 +137,7 @@
   <table class="ff">
     <thead><tr><th style="text-align:left">Layer</th><th style="text-align:left">Their headline claim</th><th style="text-align:left">What we observed (n=100)</th></tr></thead>
     <tbody>
-      <tr><td>Dasein</td><td class="claim">Curates the agent’s working context</td><td class="obs">−39% cost, −54% input, 62/100 solved</td></tr>
+      <tr><td>Parsec</td><td class="claim">Curates the agent’s working context</td><td class="obs">−39% cost, −54% input, 62/100 solved</td></tr>
       <tr><td>Woz</td><td class="claim">"Cut your Claude Code costs in half"; "30–40% faster" (an estimate)</td><td class="obs">−13% cost, −35% input, 55/100 solved; wall-clock slower, not faster</td></tr>
       <tr><td>RTK</td><td class="claim">"60–90% fewer tokens on common dev commands"</td><td class="obs">+13% cost, +16% input, 54/100 solved; its hook rewrites only shell output — native Read/Grep/Glob bypass it</td></tr>
       <tr><td>Headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+44% cost, +6% input, 58/100 solved; its docs: "code passes through" uncompressed</td></tr>
@@ -155,7 +155,7 @@
 <script src="chart.umd.min.js"></script>
 <script>
 const ARMS = {
-  dasein:   {label:"Dasein", c:"#10b981", e:"#047857", solved:62, solve_rate:62, cost_total:89.65, cost_per_solved:1.45, cost_list:455.60, input_m:144.8, output_m:1.71, steps:4856, wall_h:10.82, lat:6.18, ctx_k:41.4, hit:93.9, crcw:22.6, deaths:3, vs_a0_cost_pct:-39.1, vs_a0_input_pct:-53.6, vs_a0_time_pct:-25.0},
+  dasein:   {label:"Parsec", c:"#10b981", e:"#047857", solved:62, solve_rate:62, cost_total:89.65, cost_per_solved:1.45, cost_list:455.60, input_m:144.8, output_m:1.71, steps:4856, wall_h:10.82, lat:6.18, ctx_k:41.4, hit:93.9, crcw:22.6, deaths:3, vs_a0_cost_pct:-39.1, vs_a0_input_pct:-53.6, vs_a0_time_pct:-25.0},
   A0:       {label:"Baseline", c:"#64748b", e:"#334155", solved:57, solve_rate:57, cost_total:147.30, cost_per_solved:2.58, cost_list:862.32, input_m:312.2, output_m:3.00, steps:5325, wall_h:14.43, lat:8.75, ctx_k:79.8, hit:97.0, crcw:41.6, deaths:2, vs_a0_cost_pct:0.0, vs_a0_input_pct:0.0, vs_a0_time_pct:0.0},
   woz:      {label:"Woz", c:"#8b9bc4", e:"#5f6f9c", solved:55, solve_rate:55, cost_total:128.28, cost_per_solved:2.33, cost_list:635.24, input_m:203.1, output_m:2.95, steps:3322, wall_h:17.77, lat:14.32, ctx_k:83.2, hit:95.0, crcw:24.7, deaths:0, vs_a0_cost_pct:-12.9, vs_a0_input_pct:-34.9, vs_a0_time_pct:23.2},
   headroom: {label:"Headroom", c:"#c9a26b", e:"#a07f47", solved:58, solve_rate:58, cost_total:212.14, cost_per_solved:3.66, cost_list:908.47, input_m:329.6, output_m:2.95, steps:5850, wall_h:16.29, lat:7.97, ctx_k:76.7, hit:92.4, crcw:11.3, deaths:0, vs_a0_cost_pct:44.0, vs_a0_input_pct:5.6, vs_a0_time_pct:12.9},
@@ -226,7 +226,7 @@ function drawBar(m){
   document.getElementById("cap").innerHTML = m.cap;
 }
 const valuePlugin={id:"vlab",afterDatasetsDraw(c){if(c.canvas.id!=="bar")return;const{ctx}=c;ctx.save();ctx.font="700 12.5px -apple-system,Segoe UI,sans-serif";
-  c.data.datasets[0].data.forEach((v,i)=>{const b=c.getDatasetMeta(0).data[i];ctx.fillStyle=c.data.labels[i]==="Dasein"?"#047857":"#334155";
+  c.data.datasets[0].data.forEach((v,i)=>{const b=c.getDatasetMeta(0).data[i];ctx.fillStyle=c.data.labels[i]==="Parsec"?"#047857":"#334155";
   ctx.textBaseline="middle";ctx.fillText(curM.fmt(v),b.x+7,b.y);});ctx.restore();}};
 Chart.register(valuePlugin);
 const scatterLabels={id:"slab",afterDatasetsDraw(c){const{ctx}=c;ctx.save();ctx.textBaseline="middle";

@@ -31,7 +31,7 @@ passed.
 
 | Arm | Solved | $ / solved | Total cost | vs baseline | Input tokens | vs baseline | Wall-clock | Cache R:W |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **Dasein** | **62/100** | **$1.45** | **$89.65** | **−39%** | **144.8M** | **−54%** | **10.8 h** | 22.6 |
+| **Parsec** | **62/100** | **$1.45** | **$89.65** | **−39%** | **144.8M** | **−54%** | **10.8 h** | 22.6 |
 | Woz | 55/100 | $2.33 | $128.28 | −13% | 203.1M | −35% | 17.8 h | 24.7 |
 | Baseline (no compression) | 57/100 | $2.58 | $147.30 | — | 312.2M | — | 14.4 h | 41.6 |
 | RTK | 54/100 | $3.07 | $165.77 | +13% | 360.7M | +16% | 16.2 h | 46.4 |
@@ -324,7 +324,7 @@ This benchmark measures the one thing none of them do: **the cache-aware dollar 
 repository tasks, graded by the official SWE-bench Docker harness, with the agent, model, and price table
 held fixed for every arm.** Under that measurement the headlines do not reproduce. Two layers (RTK,
 Headroom) cost more than running no compression at all; Woz cuts total cost 13% but runs 23% slower and
-solves two fewer tasks than the baseline. [Dasein](README.md), which curates the agent's working context —
+solves two fewer tasks than the baseline. [Parsec](README.md), which curates the agent's working context —
 the part that actually grows every turn — rather than one document, one tool's output, or one-shot QA, solved
 the most tasks of any arm (62 of 100) at the lowest total cost and the lowest cost per solved task on the
 board, cutting total cost 39% and the context delivered to the model 54%.
@@ -335,4 +335,4 @@ _All vendor quotes are verbatim from the cited primary sources, retrieved 2026-0
 2026-07-04. Our measured numbers are reproducible from
 [`results/2026-07-04/paired.csv`](results/2026-07-04/paired.csv) and
 [`summary.json`](results/2026-07-04/summary.json). Benchmark sponsored and operated by
-[Dasein](https://daseinlabs.ai); the methodology is identical for every arm, including Dasein's._
+[Dasein](https://daseinlabs.ai); the methodology is identical for every arm, including Parsec's._
