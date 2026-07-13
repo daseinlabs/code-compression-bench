@@ -186,6 +186,42 @@
    "vs_a0_steps_pct": 15.1,
    "vs_a0_time_pct": 12.2,
    "vs_a0_output_pct": 7.5
+  },
+  "caveman": {
+   "n": 100,
+   "solved": 58,
+   "solve_rate": 58.0,
+   "cost_total": 118.99,
+   "cost_per_solved": 2.05,
+   "cost_list_total": 733.16,
+   "input_tokens": 253758989,
+   "cache_read": 247002418,
+   "cache_write": 6109412,
+   "uncached_input": 647159,
+   "output_tokens": 2105648,
+   "calls_total": 4895,
+   "steps_total": 4895,
+   "tool_calls_total": 4786,
+   "steps_mean": 48.95,
+   "steps_median": 38.5,
+   "wall_s_total": 43125.3,
+   "wall_s_mean": 431.253,
+   "wall_s_median": 317.4,
+   "wall_h_total": 11.98,
+   "mean_latency_s": 6.848,
+   "max_prompt_mean": 70128,
+   "max_prompt_p95": 120545,
+   "cache_hit_rate": 96.6,
+   "cr_cw": 40.4,
+   "limit_deaths": 1,
+   "degraded": 0,
+   "retries_total": 0,
+   "ftp_mean": 66.5,
+   "vs_a0_cost_pct": -19.2,
+   "vs_a0_input_pct": -18.7,
+   "vs_a0_steps_pct": -8.1,
+   "vs_a0_time_pct": -17.0,
+   "vs_a0_output_pct": -29.7
   }
  },
  "per_instance": [
@@ -6187,6 +6223,906 @@
    "input_tokens": 1139544,
    "output_tokens": 15350,
    "max_prompt_tokens": 58667,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-24026",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.273,
+   "steps": 12,
+   "max_prompt_tokens": 46703,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-21612",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 2.0813,
+   "steps": 57,
+   "max_prompt_tokens": 94565,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-21568",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.6392,
+   "steps": 18,
+   "max_prompt_tokens": 58693,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-26208",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.6346,
+   "steps": 47,
+   "max_prompt_tokens": 77196,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-12096",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2442,
+   "steps": 13,
+   "max_prompt_tokens": 44463,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-13236",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 2.7454,
+   "steps": 100,
+   "max_prompt_tokens": 103251,
+   "limit_death": 1
+  },
+  {
+   "instance": "sympy__sympy-18211",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.1382,
+   "steps": 36,
+   "max_prompt_tokens": 72498,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-15268",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.2608,
+   "steps": 38,
+   "max_prompt_tokens": 73335,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-26466",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.2158,
+   "steps": 11,
+   "max_prompt_tokens": 42753,
+   "limit_death": 0
+  },
+  {
+   "instance": "pydata__xarray-6992",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.1622,
+   "steps": 8,
+   "max_prompt_tokens": 42410,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11477",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.968,
+   "steps": 42,
+   "max_prompt_tokens": 66445,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13837",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.6415,
+   "steps": 29,
+   "max_prompt_tokens": 57013,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-9229",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 3.8087,
+   "steps": 101,
+   "max_prompt_tokens": 134896,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16899",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2836,
+   "steps": 15,
+   "max_prompt_tokens": 44542,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16631",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.7301,
+   "steps": 37,
+   "max_prompt_tokens": 55788,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-14976",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2622,
+   "steps": 9,
+   "max_prompt_tokens": 43822,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-24443",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2649,
+   "steps": 10,
+   "max_prompt_tokens": 46453,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-24177",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.3373,
+   "steps": 45,
+   "max_prompt_tokens": 73184,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-22871",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.7452,
+   "steps": 21,
+   "max_prompt_tokens": 55850,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-12489",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.5384,
+   "steps": 23,
+   "max_prompt_tokens": 53749,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16032",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.4919,
+   "steps": 55,
+   "max_prompt_tokens": 77733,
+   "limit_death": 0
+  },
+  {
+   "instance": "pylint-dev__pylint-6386",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.4582,
+   "steps": 58,
+   "max_prompt_tokens": 73891,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-10614",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.56,
+   "steps": 19,
+   "max_prompt_tokens": 60996,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-15599",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.2633,
+   "steps": 8,
+   "max_prompt_tokens": 42316,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16454",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.4447,
+   "steps": 22,
+   "max_prompt_tokens": 49326,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-23950",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.4757,
+   "steps": 26,
+   "max_prompt_tokens": 49987,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-20438",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.686,
+   "steps": 28,
+   "max_prompt_tokens": 60029,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-23413",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.6746,
+   "steps": 27,
+   "max_prompt_tokens": 99658,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11141",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.3622,
+   "steps": 16,
+   "max_prompt_tokens": 51991,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16661",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.4201,
+   "steps": 18,
+   "max_prompt_tokens": 49623,
+   "limit_death": 0
+  },
+  {
+   "instance": "pytest-dev__pytest-5840",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.2786,
+   "steps": 44,
+   "max_prompt_tokens": 70533,
+   "limit_death": 0
+  },
+  {
+   "instance": "pylint-dev__pylint-4604",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.0273,
+   "steps": 28,
+   "max_prompt_tokens": 57652,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-17318",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.2425,
+   "steps": 12,
+   "max_prompt_tokens": 45430,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-15976",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.8271,
+   "steps": 19,
+   "max_prompt_tokens": 64445,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16950",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.1458,
+   "steps": 42,
+   "max_prompt_tokens": 80151,
+   "limit_death": 0
+  },
+  {
+   "instance": "pydata__xarray-4356",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.7323,
+   "steps": 26,
+   "max_prompt_tokens": 60114,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-11510",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.7701,
+   "steps": 57,
+   "max_prompt_tokens": 95151,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13128",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.4859,
+   "steps": 18,
+   "max_prompt_tokens": 48503,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-10435",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.4616,
+   "steps": 12,
+   "max_prompt_tokens": 54157,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-14007",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.1796,
+   "steps": 55,
+   "max_prompt_tokens": 70087,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13121",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.3178,
+   "steps": 43,
+   "max_prompt_tokens": 78188,
+   "limit_death": 0
+  },
+  {
+   "instance": "pytest-dev__pytest-7205",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2695,
+   "steps": 15,
+   "max_prompt_tokens": 44212,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-8548",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.5754,
+   "steps": 54,
+   "max_prompt_tokens": 85313,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-20801",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2314,
+   "steps": 9,
+   "max_prompt_tokens": 42911,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-9602",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.8958,
+   "steps": 26,
+   "max_prompt_tokens": 66644,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-13757",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.3579,
+   "steps": 19,
+   "max_prompt_tokens": 47003,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-13579",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.645,
+   "steps": 15,
+   "max_prompt_tokens": 58950,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-14122",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.5657,
+   "steps": 53,
+   "max_prompt_tokens": 76930,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13112",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 3.4576,
+   "steps": 146,
+   "max_prompt_tokens": 120545,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-12663",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 3.383,
+   "steps": 100,
+   "max_prompt_tokens": 118673,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13810",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.474,
+   "steps": 25,
+   "max_prompt_tokens": 50031,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11087",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.0332,
+   "steps": 25,
+   "max_prompt_tokens": 77711,
+   "limit_death": 0
+  },
+  {
+   "instance": "mwaskom__seaborn-3187",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.9898,
+   "steps": 43,
+   "max_prompt_tokens": 67998,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-12754",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.9638,
+   "steps": 42,
+   "max_prompt_tokens": 61918,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-13615",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.3003,
+   "steps": 12,
+   "max_prompt_tokens": 46485,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-9673",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.4109,
+   "steps": 48,
+   "max_prompt_tokens": 69735,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-12193",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.3572,
+   "steps": 20,
+   "max_prompt_tokens": 45644,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-14792",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.9751,
+   "steps": 67,
+   "max_prompt_tokens": 99710,
+   "limit_death": 0
+  },
+  {
+   "instance": "pylint-dev__pylint-6528",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.607,
+   "steps": 62,
+   "max_prompt_tokens": 73706,
+   "limit_death": 0
+  },
+  {
+   "instance": "psf__requests-5414",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.4484,
+   "steps": 20,
+   "max_prompt_tokens": 52640,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-8035",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.543,
+   "steps": 54,
+   "max_prompt_tokens": 76302,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-14034",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.4292,
+   "steps": 15,
+   "max_prompt_tokens": 53839,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11734",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 3.4159,
+   "steps": 82,
+   "max_prompt_tokens": 130258,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-10673",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.5736,
+   "steps": 60,
+   "max_prompt_tokens": 76305,
+   "limit_death": 0
+  },
+  {
+   "instance": "pytest-dev__pytest-7324",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.0397,
+   "steps": 33,
+   "max_prompt_tokens": 66048,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13297",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.1631,
+   "steps": 22,
+   "max_prompt_tokens": 70061,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-15037",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.2622,
+   "steps": 43,
+   "max_prompt_tokens": 79814,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-8707",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.1138,
+   "steps": 33,
+   "max_prompt_tokens": 54446,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-13977",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.4198,
+   "steps": 16,
+   "max_prompt_tokens": 48107,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-15732",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 3.4493,
+   "steps": 85,
+   "max_prompt_tokens": 122351,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-22456",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.0611,
+   "steps": 28,
+   "max_prompt_tokens": 70643,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-15022",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 2.9226,
+   "steps": 67,
+   "max_prompt_tokens": 110971,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11292",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.0433,
+   "steps": 44,
+   "max_prompt_tokens": 67435,
+   "limit_death": 0
+  },
+  {
+   "instance": "pydata__xarray-6938",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.2997,
+   "steps": 13,
+   "max_prompt_tokens": 46573,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-8872",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.3519,
+   "steps": 12,
+   "max_prompt_tokens": 46989,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16938",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.7425,
+   "steps": 37,
+   "max_prompt_tokens": 58276,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11211",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.2626,
+   "steps": 9,
+   "max_prompt_tokens": 44306,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-20488",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.8586,
+   "steps": 27,
+   "max_prompt_tokens": 109230,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-13406",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.2216,
+   "steps": 35,
+   "max_prompt_tokens": 78467,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11555",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.2575,
+   "steps": 42,
+   "max_prompt_tokens": 82236,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-7440",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 2.5587,
+   "steps": 84,
+   "max_prompt_tokens": 103543,
+   "limit_death": 0
+  },
+  {
+   "instance": "pydata__xarray-4695",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.6148,
+   "steps": 14,
+   "max_prompt_tokens": 49310,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11433",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 1.3756,
+   "steps": 30,
+   "max_prompt_tokens": 83078,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11532",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.4536,
+   "steps": 25,
+   "max_prompt_tokens": 49799,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-25960",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.0538,
+   "steps": 37,
+   "max_prompt_tokens": 70596,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-21930",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.3092,
+   "steps": 20,
+   "max_prompt_tokens": 45609,
+   "limit_death": 0
+  },
+  {
+   "instance": "sympy__sympy-13551",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.8252,
+   "steps": 26,
+   "max_prompt_tokens": 68244,
+   "limit_death": 0
+  },
+  {
+   "instance": "pydata__xarray-4966",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.8071,
+   "steps": 62,
+   "max_prompt_tokens": 92609,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-15973",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.672,
+   "steps": 64,
+   "max_prompt_tokens": 86294,
+   "limit_death": 0
+  },
+  {
+   "instance": "scikit-learn__scikit-learn-13124",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.5171,
+   "steps": 12,
+   "max_prompt_tokens": 53108,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-16263",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 7.1106,
+   "steps": 121,
+   "max_prompt_tokens": 166372,
+   "limit_death": 0
+  },
+  {
+   "instance": "matplotlib__matplotlib-20826",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 3.1073,
+   "steps": 80,
+   "max_prompt_tokens": 121532,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-13033",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.3,
+   "steps": 12,
+   "max_prompt_tokens": 47031,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-15280",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 2.6565,
+   "steps": 61,
+   "max_prompt_tokens": 117364,
+   "limit_death": 0
+  },
+  {
+   "instance": "scikit-learn__scikit-learn-25102",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 2.1797,
+   "steps": 74,
+   "max_prompt_tokens": 103063,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-8593",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 2.7152,
+   "steps": 94,
+   "max_prompt_tokens": 89622,
+   "limit_death": 0
+  },
+  {
+   "instance": "sphinx-doc__sphinx-9658",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 1.7193,
+   "steps": 53,
+   "max_prompt_tokens": 85674,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-11749",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.3614,
+   "steps": 21,
+   "max_prompt_tokens": 47194,
+   "limit_death": 0
+  },
+  {
+   "instance": "astropy__astropy-13453",
+   "arm": "caveman",
+   "solved": 1,
+   "cost": 0.4801,
+   "steps": 14,
+   "max_prompt_tokens": 50508,
+   "limit_death": 0
+  },
+  {
+   "instance": "django__django-14170",
+   "arm": "caveman",
+   "solved": 0,
+   "cost": 0.5178,
+   "steps": 19,
+   "max_prompt_tokens": 55301,
    "limit_death": 0
   }
  ]

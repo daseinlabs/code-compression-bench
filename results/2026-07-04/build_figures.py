@@ -26,11 +26,11 @@ N = D["matched_n"]
 # ── brand ──────────────────────────────────────────────────────────────────
 HERO = "#10b981"; HERO_DARK = "#047857"; HERO_SOFT = "#d1fae5"
 SLATE = "#64748b"; SLATE_DK = "#334155"
-COL = {"dasein": HERO, "A0": SLATE, "woz": "#8b9bc4", "headroom": "#c9a26b", "rtk": "#b48ab8"}
-EDGE = {"dasein": HERO_DARK, "A0": SLATE_DK, "woz": "#5f6f9c", "headroom": "#a07f47", "rtk": "#8c6690"}
+COL = {"dasein": HERO, "A0": SLATE, "woz": "#8b9bc4", "headroom": "#c9a26b", "rtk": "#b48ab8", "caveman": "#cc7a4d"}
+EDGE = {"dasein": HERO_DARK, "A0": SLATE_DK, "woz": "#5f6f9c", "headroom": "#a07f47", "rtk": "#8c6690", "caveman": "#9c552e"}
 INK = "#1e293b"; INK_SOFT = "#64748b"; GRID = "#e6ebf1"
 BAD = "#d98a8a"; BAD_DK = "#b04a4a"
-LABEL = {"dasein": "Parsec", "A0": "Baseline", "woz": "Woz", "headroom": "Headroom", "rtk": "RTK"}
+LABEL = {"dasein": "Parsec", "A0": "Baseline", "woz": "Woz", "headroom": "Headroom", "rtk": "RTK", "caveman": "Caveman"}
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -99,7 +99,7 @@ def hbar(fname, title, subtitle, values, fmt, *, better="low", xlabel="",
 
 # ── 1. savings vs baseline (diverging hero) ─────────────────────────────────
 def fig_savings():
-    arms = ["dasein", "woz", "rtk", "headroom"]
+    arms = ["dasein", "woz", "rtk", "headroom", "caveman"]
     v = {a: A[a]["vs_a0_cost_pct"] for a in arms}
     items = sorted(v.items(), key=lambda kv: kv[1])  # most negative (best) first
     arms = [a for a, _ in items]; vals = [x for _, x in items]
@@ -144,7 +144,7 @@ def fig_savings():
 # ── 1b. solves relative to baseline (companion to fig_savings) ───────────────
 def fig_solves():
     base = A["A0"]["solved"]
-    arms = ["dasein", "woz", "rtk", "headroom"]
+    arms = ["dasein", "woz", "rtk", "headroom", "caveman"]
     v = {a: A[a]["solved"] - base for a in arms}
     items = sorted(v.items(), key=lambda kv: kv[1], reverse=True)  # most solves gained first
     arms = [a for a, _ in items]; vals = [x for _, x in items]
@@ -265,6 +265,7 @@ def fig_scatter():
         "A0":       (0.7, -2.0, "left", "top"),
         "rtk":      (0.7, 0.0, "left", "center"),
         "headroom": (0.7, 0.0, "left", "center"),
+        "caveman":  (0.7, 2.0, "left", "bottom"),
     }
     for a, (dx, dy, ha, va) in place.items():
         x, yv = pts[a]; big = a == "dasein"
@@ -287,7 +288,7 @@ def fig_scatter():
 
 # ── 9. cache health ─────────────────────────────────────────────────────────
 def fig_cache():
-    arms = ["A0", "dasein", "woz", "headroom", "rtk"]
+    arms = ["A0", "dasein", "woz", "headroom", "rtk", "caveman"]
     v = {a: A[a]["cr_cw"] for a in arms}
     fig = plt.figure(figsize=(11.4, 6.6))
     ax = fig.add_axes([0.10, 0.16, 0.86, 0.585])
@@ -343,6 +344,7 @@ def fig_cost_time():
         "A0":       (2.0, -2, "left", "top"),
         "rtk":      (2.2, 0, "left", "center"),
         "headroom": (2.2, 0, "left", "center"),
+        "caveman":  (2.2, 0, "left", "center"),
     }
     for a, (dx, dy, ha, va) in place.items():
         x, y = pts[a]; big = a == "dasein"

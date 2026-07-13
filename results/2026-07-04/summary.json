@@ -29,6 +29,20 @@
       "cr_cw": 22.6,
       "input_vs_a0_pct": -53.6
     },
+    "caveman": {
+      "n": 100,
+      "solved": 58,
+      "calls": 4895,
+      "input_tokens": 253758989,
+      "cache_read": 247002418,
+      "cache_write": 6109412,
+      "output_tokens": 2105648,
+      "cost_total": 118.99,
+      "cost_per_solved": 2.05,
+      "vs_a0_pct": -19.2,
+      "cr_cw": 40.4,
+      "input_vs_a0_pct": -18.7
+    },
     "woz": {
       "n": 100,
       "solved": 55,

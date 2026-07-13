@@ -13,11 +13,12 @@ html = open(P).read()
 
 STYLE = {"dasein": ('Parsec', "#10b981", "#047857"), "A0": ('Baseline', "#64748b", "#334155"),
          "woz": ('Woz', "#8b9bc4", "#5f6f9c"), "headroom": ('Headroom', "#c9a26b", "#a07f47"),
-         "rtk": ('RTK', "#b48ab8", "#8c6690")}
+         "rtk": ('RTK', "#b48ab8", "#8c6690"),
+         "caveman": ('Caveman', "#cc7a4d", "#9c552e")}
 
 # ── 1. ARMS data block ──────────────────────────────────────────────────────
 lines = ["const ARMS = {"]
-for k in ("dasein", "A0", "woz", "headroom", "rtk"):
+for k in ("dasein", "A0", "woz", "headroom", "rtk", "caveman"):
     lab, c, e = STYLE[k]; v = A[k]
     lines.append(
         '  %s:%s{label:"%s", c:"%s", e:"%s", solved:%d, solve_rate:%d, cost_total:%.2f, '
@@ -45,9 +46,11 @@ FVF = {
             'its hook rewrites only shell output — native Read/Grep/Glob bypass it'),
     "headroom": ('"60–95% fewer tokens, same answers"; "better caching"',
                  'its docs: "code passes through" uncompressed'),
+    "caveman": ('"Cuts 65% of output tokens (measured)"; "full technical accuracy"',
+                'the 65% is output-only — a small share of agentic-loop cost'),
 }
 rows = []
-for k in ("dasein", "woz", "rtk", "headroom"):
+for k in ("dasein", "woz", "rtk", "headroom", "caveman"):
     v = A[k]; claim, note = FVF[k]
     obs = "%s cost, %s input, %d/100 solved" % (pct(v["vs_a0_cost_pct"]), pct(v["vs_a0_input_pct"]), int(v["solved"]))
     if note:
@@ -68,6 +71,6 @@ html = html.replace("both versus the no-compression baseline; the top-right corn
 open(P, "w").write(html)
 # report
 print("dashboard regenerated. FVF observed column now:")
-for k in ("dasein", "woz", "rtk", "headroom"):
+for k in ("dasein", "woz", "rtk", "headroom", "caveman"):
     v = A[k]
     print("  %-9s %s cost, %s input, %d/100" % (STYLE[k][0], pct(v["vs_a0_cost_pct"]), pct(v["vs_a0_input_pct"]), int(v["solved"])))

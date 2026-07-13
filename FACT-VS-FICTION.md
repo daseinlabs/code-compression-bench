@@ -32,6 +32,7 @@ passed.
 | Arm | Solved | $ / solved | Total cost | vs baseline | Input tokens | vs baseline | Wall-clock | Cache R:W |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | **Parsec** | **62/100** | **$1.45** | **$89.65** | **−39%** | **144.8M** | **−54%** | **10.8 h** | 22.6 |
+| Caveman | 58/100 | $2.05 | $118.99 | −19% | 253.8M | −19% | 12.0 h | 40.4 |
 | Woz | 55/100 | $2.33 | $128.28 | −13% | 203.1M | −35% | 17.8 h | 24.7 |
 | Baseline (no compression) | 57/100 | $2.58 | $147.30 | — | 312.2M | — | 14.4 h | 41.6 |
 | RTK | 54/100 | $3.07 | $165.77 | +13% | 360.7M | +16% | 16.2 h | 46.4 |
@@ -39,6 +40,39 @@ passed.
 
 Compresr, Edgee, and bear-1.2 produced no graded result; the reasons are specific to each and covered below.
 The remainder of this document takes the layers one at a time, strongest first.
+
+---
+
+## Caveman
+
+**What it is.** A free, open-source Claude Code plugin (also packaged for ~40 other agents) that appends a
+"caveman-speak" ruleset to the model's context so it answers in terse fragments — dropped articles, no
+filler, no pleasantries — while keeping code, API names, and error strings verbatim. It is an output-shaping
+layer: it does not touch the input context, the tool schemas, or tool results.
+
+### Claims (verbatim, sourced)
+
+| Claim | Source | What it was measured on |
+|---|---|---|
+| "Cuts 65% of output tokens (measured)" while keeping "full technical accuracy" | [github.com/JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) | An **output-token** reduction, measured on the project's own prompt set — a per-response token count, not the cost of solving a task with a multi-turn agent. |
+| "Same answers, ~65% fewer tokens" | [getcaveman.dev](https://getcaveman.dev) | Scoped to what the model *emits*; input and tool output are untouched by design. |
+
+### What we observed
+
+Output tokens fell ~30% (2.11M versus the baseline's 3.00M), below the advertised 65%. Total cost was
+$118.99 — 19% under the baseline — with 58 of 100 solved, at $2.05 per solved task.
+
+### Why the gap
+
+The 65% is an **output-token** figure, measured on the kind of open prose caveman is built to trim. Coding
+output is different: most of what the agent emits is code, tool calls, and exact error strings — which the
+ruleset preserves verbatim — so there is far less fluff to compress, and the reduction lands near 30% rather
+than 65%. It is also, by construction, an output-only number: the input context re-sent every turn — tool
+results, file reads, the tool-schema roster — is the bulk of an agentic session's tokens, and caveman never
+touches it.
+
+**Verdict.** The output reduction is genuine but measures near 30% here, not 65%, and it is scoped to
+output. Total cost was 19% below the no-compression baseline.
 
 ---
 

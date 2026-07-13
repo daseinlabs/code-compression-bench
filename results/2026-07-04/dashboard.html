@@ -110,7 +110,7 @@
   <div class="seg" id="seg"></div>
   <div class="chartwrap">
     <div style="position:relative;width:100%;height:380px">
-      <canvas id="bar" role="img" aria-label="Bar chart comparing the selected metric across the five arms"></canvas>
+      <canvas id="bar" role="img" aria-label="Bar chart comparing the selected metric across the six arms"></canvas>
     </div>
   </div>
   <p class="cap" id="cap"></p>
@@ -141,6 +141,7 @@
       <tr><td>Woz</td><td class="claim">"Cut your Claude Code costs in half"; "30–40% faster" (an estimate)</td><td class="obs">−13% cost, −35% input, 55/100 solved; wall-clock slower, not faster</td></tr>
       <tr><td>RTK</td><td class="claim">"60–90% fewer tokens on common dev commands"</td><td class="obs">+13% cost, +16% input, 54/100 solved; its hook rewrites only shell output — native Read/Grep/Glob bypass it</td></tr>
       <tr><td>Headroom</td><td class="claim">"60–95% fewer tokens, same answers"; "better caching"</td><td class="obs">+44% cost, +6% input, 58/100 solved; its docs: "code passes through" uncompressed</td></tr>
+      <tr><td>Caveman</td><td class="claim">"Cuts 65% of output tokens (measured)"; "full technical accuracy"</td><td class="obs">−19% cost, −19% input, 58/100 solved; the 65% is output-only — a small share of agentic-loop cost</td></tr>
     </tbody>
   </table>
   </div>
@@ -160,8 +161,9 @@ const ARMS = {
   woz:      {label:"Woz", c:"#8b9bc4", e:"#5f6f9c", solved:55, solve_rate:55, cost_total:128.28, cost_per_solved:2.33, cost_list:635.24, input_m:203.1, output_m:2.95, steps:3322, wall_h:17.77, lat:14.32, ctx_k:83.2, hit:95.0, crcw:24.7, deaths:0, vs_a0_cost_pct:-12.9, vs_a0_input_pct:-34.9, vs_a0_time_pct:23.2},
   headroom: {label:"Headroom", c:"#c9a26b", e:"#a07f47", solved:58, solve_rate:58, cost_total:212.14, cost_per_solved:3.66, cost_list:908.47, input_m:329.6, output_m:2.95, steps:5850, wall_h:16.29, lat:7.97, ctx_k:76.7, hit:92.4, crcw:11.3, deaths:0, vs_a0_cost_pct:44.0, vs_a0_input_pct:5.6, vs_a0_time_pct:12.9},
   rtk:      {label:"RTK", c:"#b48ab8", e:"#8c6690", solved:54, solve_rate:54, cost_total:165.77, cost_per_solved:3.07, cost_list:1015.00, input_m:360.7, output_m:3.22, steps:6131, wall_h:16.18, lat:9.33, ctx_k:81.6, hit:97.3, crcw:46.4, deaths:2, vs_a0_cost_pct:12.5, vs_a0_input_pct:15.6, vs_a0_time_pct:12.2},
+  caveman:  {label:"Caveman", c:"#cc7a4d", e:"#9c552e", solved:58, solve_rate:58, cost_total:118.99, cost_per_solved:2.05, cost_list:733.16, input_m:253.8, output_m:2.11, steps:4895, wall_h:11.98, lat:6.85, ctx_k:70.1, hit:96.6, crcw:40.4, deaths:1, vs_a0_cost_pct:-19.2, vs_a0_input_pct:-18.7, vs_a0_time_pct:-17.0},
 };
-const ORDER = ["dasein","A0","woz","headroom","rtk"];
+const ORDER = ["dasein","A0","woz","headroom","rtk","caveman"];
 const fmtPct = v => (v>0?"+":"")+v.toFixed(0)+"%";
 
 /* ---- leaderboard table ---- */

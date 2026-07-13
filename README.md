@@ -6,10 +6,6 @@
 </p>
 
 <p align="center">
-  Built and maintained by <a href="https://daseinlabs.ai">Dasein</a> as an open resource for the industry.
-</p>
-
-<p align="center">
   <a href="FACT-VS-FICTION.md">Vendor claims vs measured</a> &nbsp;·&nbsp;
   <a href="results/2026-07-04/">Full results &amp; method</a> &nbsp;·&nbsp;
   <a href="results/2026-07-04/paired.csv">Per-task data</a> &nbsp;·&nbsp;
@@ -26,8 +22,7 @@ agent still solve the problem, and what did it cost end to end? This benchmark f
 compression layer. One scaffold (headless Claude Code), one model (`claude-sonnet-4-6`), 100 tasks from
 SWE-bench Verified, and the official SWE-bench Docker grader are held identical for every arm; only the
 compression layer changes, so any difference in cost or quality is attributable to it. Arms are ranked by
-**cost per solved task** — cache-aware total cost divided by the tasks the grader passed — the figure a
-coding team actually pays per result.
+**cost per solved task** — cache-aware total cost divided by the tasks the grader passed.
 
 > Run 2026-07-04 · 100 tasks from SWE-bench Verified · model `claude-sonnet-4-6` · cache-aware pricing ·
 > official SWE-bench Docker grader.
@@ -37,35 +32,33 @@ coding team actually pays per result.
 | # | Arm | Solved | $ / solved | vs base | Total cost | vs base | Input | vs base | Wall-clock | vs base | Cache R:W |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1 | **Parsec** | **62 / 100** | **$1.45** | **−44%** | **$89.65** | **−39%** | **144.8M** | **−54%** | **10.8 h** | **−25%** | 22.6 |
-| 2 | Woz | 55 / 100 | $2.33 | −10% | $128.28 | −13% | 203.1M | −35% | 17.8 h | +23% | 24.7 |
-| 3 | Baseline (no compression) | 57 / 100 | $2.58 | — | $147.30 | — | 312.2M | — | 14.4 h | — | 41.6 |
-| 4 | RTK | 54 / 100 | $3.07 | +19% | $165.77 | +13% | 360.7M | +16% | 16.2 h | +12% | 46.4 |
-| 5 | Headroom | 58 / 100 | $3.66 | +42% | $212.14 | +44% | 329.6M | +6% | 16.3 h | +13% | 11.3 |
+| 2 | Caveman | 58 / 100 | $2.05 | −21% | $118.99 | −19% | 253.8M | −19% | 12.0 h | −17% | 40.4 |
+| 3 | Woz | 55 / 100 | $2.33 | −10% | $128.28 | −13% | 203.1M | −35% | 17.8 h | +23% | 24.7 |
+| 4 | Baseline (no compression) | 57 / 100 | $2.58 | — | $147.30 | — | 312.2M | — | 14.4 h | — | 41.6 |
+| 5 | RTK | 54 / 100 | $3.07 | +19% | $165.77 | +13% | 360.7M | +16% | 16.2 h | +12% | 46.4 |
+| 6 | Headroom | 58 / 100 | $3.66 | +42% | $212.14 | +44% | 329.6M | +6% | 16.3 h | +13% | 11.3 |
 
-Parsec — Dasein's own compression layer — solves the most tasks of any arm — **62 of 100**, five more than the no-compression baseline — while
-running the full set for **$89.65**, the lowest total cost, and the lowest cost per solved task at **$1.45**,
-44% below the baseline's $2.58; the next-cheapest arm (Woz) costs $2.33, 61% more per solved task. Woz also
-cuts total cost versus the baseline (−13%); RTK (+13%) and Headroom (+44%) cost more than the baseline.
-Parsec is the only arm that both solves more tasks than the baseline and costs less; Woz is the one other
-arm below the baseline on cost per solved task.
+Arms are ranked by cost per solved task. Three fall below the no-compression baseline — Parsec ($1.45),
+Caveman ($2.05), and Woz ($2.33); RTK ($3.07) and Headroom ($3.66) fall above it. On total cost, Parsec
+(−39%), Caveman (−19%), and Woz (−13%) are below the baseline and RTK (+13%) and Headroom (+44%) above.
+Parsec and Caveman also solve more tasks than the baseline (62 and 58 of 100 versus 57).
 
-The cache-aware pricing above is the conservative frame. Even at undiscounted list price — no cache
-assumptions at all — the ordering at the top is identical and the gap wider: Parsec costs **$456** to the
-baseline's **$862** (−47%), against $613–805 for the other arms.
+The leaderboard uses cache-aware pricing. At undiscounted list price (no cache credit) the ranking is
+unchanged; per-arm list-price totals are in the table below.
 
 <p align="center">
-  <img src="results/2026-07-04/figures/1_savings_vs_baseline.png" width="820" alt="Total cost relative to the no-compression baseline: Parsec −39%; Woz −13%; RTK +13% and Headroom +44% sit above the baseline.">
+  <img src="results/2026-07-04/figures/1_savings_vs_baseline.png" width="820" alt="Total cost relative to the no-compression baseline: Parsec −39%, Caveman −19%, Woz −13% below it; RTK +13% and Headroom +44% above it.">
 </p>
 
 <p align="center">
-  <img src="results/2026-07-04/figures/1b_solves_vs_baseline.png" width="820" alt="Tasks solved relative to the no-compression baseline: Parsec +5, Headroom +1, Woz −2, RTK −3.">
+  <img src="results/2026-07-04/figures/1b_solves_vs_baseline.png" width="820" alt="Tasks solved relative to the no-compression baseline: Parsec +5, Caveman +1, Headroom +1, Woz −2, RTK −3.">
 </p>
 
 ## Cost
 
 <p align="center">
-  <img src="results/2026-07-04/figures/2_cost_per_solved.png" width="49%" alt="Cost per solved task: Parsec lowest at $1.45.">
-  <img src="results/2026-07-04/figures/3_total_cost.png" width="49%" alt="Total cost: Parsec $90, the lowest of every arm.">
+  <img src="results/2026-07-04/figures/2_cost_per_solved.png" width="49%" alt="Cost per solved task by arm.">
+  <img src="results/2026-07-04/figures/3_total_cost.png" width="49%" alt="Total cost by arm.">
 
 </p>
 
@@ -79,13 +72,12 @@ than the baseline: the ranking tracks dollars, not tokens.
 ## Time and steps
 
 <p align="center">
-  <img src="results/2026-07-04/figures/4_wall_time.png" width="49%" alt="Wall-clock time: Parsec fastest at 10.8 hours; Woz slowest at 17.8 hours.">
-  <img src="results/2026-07-04/figures/5_steps.png" width="49%" alt="Agent steps by arm; Woz fewest at 3,322.">
+  <img src="results/2026-07-04/figures/4_wall_time.png" width="49%" alt="Wall-clock time by arm.">
+  <img src="results/2026-07-04/figures/5_steps.png" width="49%" alt="Agent steps by arm.">
 </p>
 
-Parsec completed the run in **10.8 hours**, 25% faster than the no-compression baseline and the fastest of
-any arm, with the lowest mean per-call latency (6.2 s versus the baseline's 8.8 s). Woz was the slowest at
-17.8 hours — 23% slower than the baseline — with the highest per-call latency (14.3 s).
+Wall-clock time ranged from 10.8 hours (Parsec) to 17.8 hours (Woz), against 14.4 hours for the baseline.
+Mean per-call latency ranged from 6.2 s (Parsec) to 14.3 s (Woz).
 
 ## Cost and time together
 
@@ -93,33 +85,31 @@ any arm, with the lowest mean per-call latency (6.2 s versus the baseline's 8.8 
   <img src="results/2026-07-04/figures/10_cost_vs_time.png" width="760" alt="Cost savings versus time savings against the baseline, per layer.">
 </p>
 
-The chart plots cost savings against time savings, both against the baseline. The upper-right region saves
-on both; Parsec (−39% cost, −25% wall-clock time) is the only layer in it.
+Cost savings against time savings, both relative to the baseline. The upper-right region saves on both;
+only Parsec falls in it (−39% cost, −25% time).
 
 ## Where the cost comes from
 
 <p align="center">
-  <img src="results/2026-07-04/figures/7_input_tokens.png" width="49%" alt="Input tokens delivered to the model: Parsec 145M, the fewest by a wide margin.">
-  <img src="results/2026-07-04/figures/6_peak_context.png" width="49%" alt="Peak working context: Parsec 41K tokens, about half of every other arm.">
+  <img src="results/2026-07-04/figures/7_input_tokens.png" width="49%" alt="Input tokens delivered to the model, by arm.">
+  <img src="results/2026-07-04/figures/6_peak_context.png" width="49%" alt="Peak working context (mean) by arm.">
 </p>
 
 Cost and time are outcomes; the drivers are how much context the model carries and how stable the prompt
-cache stays underneath it. Parsec delivers **54% fewer input tokens** than the baseline and holds the model's
-peak working context at **41K tokens on average — about half** the 77–83K every other arm carries. It
-also produces the fewest output tokens of any arm — **1.71M, 43% below the baseline** — which matters
-because output is billed at the highest rate ($15 per million), so generating less of it weighs most on the
-bill.
+cache stays underneath it. Input tokens delivered to the model range from 144.8M to 360.7M across arms, and
+mean peak working context from 41K to 83K. Output tokens are billed at the highest rate ($15 per million),
+so output volume weighs most heavily on the bill per token.
 
 <p align="center">
   <img src="results/2026-07-04/figures/9_cache_health.png" width="58%" alt="Cache read-to-write ratio by arm; Headroom is lowest at 11.3.">
 </p>
 
-Cache reuse explains the most expensive arm. A cached prefix is billed far below fresh input, so a higher
-read:write ratio is cheaper. Headroom's ratio is 11.3, the lowest of any arm — it rewrites the cached prefix often enough to re-pay
-the cache-write rate repeatedly, which is why it is the most expensive arm (+44%) even though its own input
-tokens barely move (+6%). Parsec's ratio (22.6) sits below the baseline's (41.6) for the opposite, benign
-reason: it carries far less cached context to begin with, so there is simply less cached prefix to re-read —
-fewer reads over a small, stable prefix, not more writes — and its bill still falls 39%.
+A cached prefix is billed far below fresh input, so a higher read:write ratio is cheaper per token of
+context. A low ratio has two causes a single number cannot separate: rewriting the cached prefix often
+(re-paying the cache-write rate), or carrying little cached context to begin with. Headroom's ratio (11.3,
+the lowest) is the first case — it re-pays the cache-write rate repeatedly, which is why it is the most
+expensive arm (+44%) despite input tokens that barely move (+6%). The ratio is read alongside total input,
+not on its own.
 
 ## Savings versus solve rate
 
@@ -127,33 +117,32 @@ fewer reads over a small, stable prefix, not more writes — and its bill still 
   <img src="results/2026-07-04/figures/8_cost_vs_success.png" width="760" alt="Cost savings versus solve rate against the baseline, per layer.">
 </p>
 
-The chart plots each layer by cost savings (vertical) and solve rate (horizontal), both against the
-baseline. The upper-right region is cheaper and solves more; Parsec (62 solved, −39% cost) is the only layer
-in it.
+Each layer by cost savings (vertical) and solve rate (horizontal), both relative to the baseline. The
+upper-right region is cheaper and solves more; only Parsec falls in it (62 solved, −39% cost).
 
 ## Every measured value
 
 The complete per-arm rollup. Best value in each row is in bold.
 
-| KPI | Parsec | Woz | Baseline | RTK | Headroom |
-|---|---:|---:|---:|---:|---:|
-| Tasks solved (of 100) | **62** | 55 | 57 | 54 | 58 |
-| Cost per solved task | **$1.45** | $2.33 | $2.58 | $3.07 | $3.66 |
-| Cost per solved task vs baseline | **−44%** | −10% | — | +19% | +42% |
-| Total cost | **$89.65** | $128.28 | $147.30 | $165.77 | $212.14 |
-| List-price cost (no cache discount) | **$456** | $635 | $862 | $1,015 | $908 |
-| Total cost vs baseline | **−39%** | −13% | — | +13% | +44% |
-| Input tokens | **144.8M** | 203.1M | 312.2M | 360.7M | 329.6M |
-| Input tokens vs baseline | **−54%** | −35% | — | +16% | +6% |
-| Output tokens | **1.71M** | 2.95M | 3.00M | 3.22M | 2.95M |
-| Agent steps | 4,856 | **3,322** | 5,325 | 6,131 | 5,850 |
-| Wall-clock hours | **10.8** | 17.8 | 14.4 | 16.2 | 16.3 |
-| Mean latency per call | **6.2 s** | 14.3 s | 8.8 s | 9.3 s | 8.0 s |
-| Peak working context (mean) | **41.4K** | 83.2K | 79.8K | 81.6K | 76.7K |
-| Cache hit rate | 93.9% | 95.0% | 97.0% | **97.3%** | 92.4% |
-| Cache read:write ratio | 22.6 | 24.7 | 41.6 | **46.4** | 11.3 |
-| Runs ended by context limit | 3 | **0** | 2 | 2 | **0** |
-| API calls | 4,683 | 3,005 | 4,084 | 4,964 | 4,504 |
+| KPI | Parsec | Caveman | Woz | Baseline | RTK | Headroom |
+|---|---:|---:|---:|---:|---:|---:|
+| Tasks solved (of 100) | **62** | 58 | 55 | 57 | 54 | 58 |
+| Cost per solved task | **$1.45** | $2.05 | $2.33 | $2.58 | $3.07 | $3.66 |
+| Cost per solved task vs baseline | **−44%** | −21% | −10% | — | +19% | +42% |
+| Total cost | **$89.65** | $118.99 | $128.28 | $147.30 | $165.77 | $212.14 |
+| List-price cost (no cache discount) | **$456** | $733 | $635 | $862 | $1,015 | $908 |
+| Total cost vs baseline | **−39%** | −19% | −13% | — | +13% | +44% |
+| Input tokens | **144.8M** | 253.8M | 203.1M | 312.2M | 360.7M | 329.6M |
+| Input tokens vs baseline | **−54%** | −19% | −35% | — | +16% | +6% |
+| Output tokens | **1.71M** | 2.11M | 2.95M | 3.00M | 3.22M | 2.95M |
+| Agent steps | 4,856 | 4,895 | **3,322** | 5,325 | 6,131 | 5,850 |
+| Wall-clock hours | **10.8** | 12.0 | 17.8 | 14.4 | 16.2 | 16.3 |
+| Mean latency per call | **6.2 s** | 6.9 s | 14.3 s | 8.8 s | 9.3 s | 8.0 s |
+| Peak working context (mean) | **41.4K** | 70.1K | 83.2K | 79.8K | 81.6K | 76.7K |
+| Cache hit rate | 93.9% | 96.6% | 95.0% | 97.0% | **97.3%** | 92.4% |
+| Cache read:write ratio | 22.6 | 40.4 | 24.7 | 41.6 | **46.4** | 11.3 |
+| Runs ended by context limit | 3 | 1 | **0** | 2 | 2 | **0** |
+| API calls | 4,683 | 4,895 | 3,005 | 4,084 | 4,964 | 4,504 |
 
 Cache read:write is the ratio of cached-prefix reads to cache writes; a lower ratio means the layer re-pays
 the cache-write rate more often.
@@ -167,6 +156,7 @@ QA, shell-command output in isolation, token counts with no task-success check, 
 
 | Layer | Headline claim | Measured on | Our result (n = 100) |
 |---|---|---|---|
+| Caveman | "Cuts 65% of output tokens (measured)" | Output-token count on general prose; input and tool output unchanged | −19% cost, 58 solved; output ~30% lower, not 65% |
 | Woz | "Cut your Claude Code costs in half" | Live-session API usage, undisclosed task mix; quality on Opus 4.7 vs an Opus 4.6 baseline | −13% cost, 55 solved, 23% slower |
 | RTK | "60–90% fewer tokens on common dev commands" | Shell-command output in isolation (its own README: native Read/Grep/Glob bypass the hook) | +16% input, +13% cost, 54 solved |
 | Headroom | "60–95% fewer tokens, same answers" | Single-shot QA (GSM8K, SQuAD…); its docs: "code passes through" uncompressed | +6% input, +44% cost (most expensive), 58 solved |
@@ -232,4 +222,4 @@ results/    per-run records, figures, the interactive dashboard, and the generat
 Apache-2.0. Compression products referenced here are the property of their respective owners; this repository
 contains only thin client adapters to their public interfaces.
 
-<p align="center"><sub>Benchmark sponsored and operated by Dasein and built to be neutral: one fixed scaffold and model, an official third-party grader, one shared price table. Anyone can re-run it and check the numbers.</sub></p>
+<p align="center"><sub>Sponsored and operated by Dasein. One fixed scaffold and model, an official third-party grader, one shared price table; every arm runs as its shipped product through its public interface. Anyone can re-run it and verify the numbers.</sub></p>
