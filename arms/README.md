@@ -20,6 +20,11 @@ Built in (`bench.arm.BaselineArm`), always ready, needs nothing. `transform` ret
 messages unchanged so the same call path is exercised as every other arm.
 
 ## dasein — hosted Parsec compression service (ProxyArm + harness hooks)
+> **DEPRECATED (2026-09).** The July `dasein` arm (hosted service + `DASEIN_HOOK_CMD`
+> hook-runner) is obsolete. Today's product ships as the `parsec` binary + Claude Code
+> plugin + hosted brain — use the **parsec** and **parsec_prod** arms below. Kept
+> registered only to reproduce the July baseline.
+
 The Parsec arm is a thin over-the-wire client to a hosted compression service; this repo contains no
 vendor internals. Under Claude Code it runs across two seams. The PROXY seam is server-side: the
 Parsec service speaks the native Anthropic Messages API, processes each turn, and forwards to the
@@ -304,6 +309,91 @@ translation. In the bench `CompresrArm` is a **ProxyArm**: it points Claude Code
   `COMPRESR_GATEWAY_URL=http://127.0.0.1:18081 make bench ARM=compresr`.
 
 ---
+
+## parsec — Dasein parsec proxy + Claude Code plugin, spawned per solve (ProxyArm + plugin)
+Today's Dasein product: the `parsec` binary (`parsec proxy`) + the Claude Code plugin + a HOSTED
+brain (github.com/daseinlabs/parsec). This arm is a clean-room thin client — it imports no vendor
+internals. Unlike the other proxy arms it SPAWNS ITS OWN proxy per solve on a free 127.0.0.1 port
+(isolated `HOME=<run_dir>/proxy_home`), so the proxy's UPSTREAM can be bound to THIS run's gateway
+even though the port is per-solve. It ALSO loads the parsec plugin (its scout tools/hooks/skills)
+via the SDK `plugins=[{"type":"local","path":...}]` mechanism; parsec does NOT remove native tools
+(`replace_tools=False`).
+
+### Topology
+```
+Claude Code ─(ANTHROPIC_BASE_URL = spawned proxy)─> parsec proxy (compresses; HOSTED brain)
+            ─(PARSEC_UPSTREAM = this run's gateway)─> gateway ─> Anthropic (api.anthropic.com)
+Claude Code also loads the parsec plugin: mcp__plugin_parsec_scout__* + hooks + skills.
+```
+
+| arm | where the vendor's upstream is configured |
+| --- | --- |
+| parsec | `PARSEC_UPSTREAM=<run gateway>`, set by the arm when it spawns the proxy per solve |
+
+- **Env:** `PARSEC_BIN` (binary; run as `<bin> proxy`), `PARSEC_PLUGIN_DIR` (installed plugin dir,
+  discovered on the box), `PARSEC_CREDENTIALS` (hosted-brain `credentials.json`, copied into the
+  proxy HOME; default `~/.parsec/credentials.json`), `PARSEC_PROXY_STATUS_PATH` (status route used
+  to read the brain `checkpoint_id` — a small default list is tried; CONFIRM the real route at box
+  smoke), `PARSEC_BENCH_CKPT_SHA256` (optional bundle pin), `PARSEC_PROXY_TIMEOUT_S` (default 20).
+- **Readiness gates (fail-closed):** binary resolvable + credentials present + a live
+  spawn-and-probe that confirms a brain `checkpoint_id`. A brain-less proxy fail-opens to
+  passthrough and would mislabel a plain run "parsec" → SKIP with a precise reason. Records
+  `checkpoint_id` + parsec version. The proxy `savings-ledger/v0` is copied into the run dir and
+  summarised (counterfactual vs billed; null-probe rows excluded) as RunRecord diagnostics — the
+  ranking cost still comes from the gateway usage, as for every arm.
+- **Launch parsec:** `PARSEC_BIN=… PARSEC_PLUGIN_DIR=… make bench ARMS=parsec` with a shared
+  `anthropic`-mode gateway at `CCB_GATEWAY_URL`.
+
+## parsec_prod — the SHIPPED parsec product, ZERO harness interposition (ProxyArm + plugin)
+For internal measurement: the product exactly as a user runs it. No CCB gateway, no harness hooks,
+no bridge token, `max_turns=None` (unlimited). Claude Code loads the plugin and points
+`ANTHROPIC_BASE_URL` at the box's LONG-RUNNING user-level parsec proxy (`PARSEC_PROD_BASE_URL`),
+whose upstream is `api.anthropic.com` directly with the real key — so the run is handed the REAL
+`ANTHROPIC_API_KEY` (not the bridge token).
+
+### Topology
+```
+Claude Code ─(ANTHROPIC_BASE_URL = PARSEC_PROD_BASE_URL, real ANTHROPIC_API_KEY)─>
+    box's long-running parsec proxy ─> Anthropic (api.anthropic.com)     [NO CCB gateway]
+Claude Code also loads the parsec plugin.
+```
+
+- **Env:** `PARSEC_PROD_BASE_URL` (the running proxy), `PARSEC_PLUGIN_DIR`, `ANTHROPIC_API_KEY`
+  (real), `PARSEC_PROD_LEDGER` (default `~/.parsec/ledger.jsonl`).
+- **Readiness gates:** plugin dir valid + prod proxy reachable (TCP) + real key present; records
+  parsec version + best-effort `checkpoint_id`.
+- **Cost/usage:** from the SDK result's `total_cost_usd`/usage (`reported_cost_usd`) plus the
+  product ledger filtered by `conv_id`. The prod proxy keys conversations by the CC session id, not
+  the CCB run-id (no header is injected) — mapping that id to a run is a BOX-SMOKE item; the arm
+  records `conv_id` as the run tag and filters the ledger best-effort.
+- **Launch parsec_prod:** start the product proxy (`parsec:setup`), then
+  `PARSEC_PROD_BASE_URL=… PARSEC_PLUGIN_DIR=… ANTHROPIC_API_KEY=… make bench ARMS=parsec_prod`.
+
+## fermat — Quotient Labs "Fermat's Last Token" `claude` shim (CLI-shim arm)
+Fermat ships a `claude` SHIM that starts its own local proxy and spawns the real Claude Code with
+its Search/Edit MCP servers, a native-file tool-gate and compression. We run it as shipped: the
+SDK's executable (`cli_path`) is pointed at the shim (`FERMAT_SHIM`); we impose NO tool
+restrictions ourselves (Fermat's own tool-gate does that). Model calls reach the gateway (Fermat's
+proxy upstream); every `FERMAT_*` var in the operator env is forwarded to the child automatically.
+
+### Topology
+```
+Claude Agent SDK ─(cli_path = FERMAT_SHIM)─> fermat shim ─> real claude (FERMAT_CLAUDE_BIN)
+    ─(ANTHROPIC_BASE_URL → Fermat's local proxy)─> Fermat proxy
+    ─(FERMAT_UPSTREAM_BASE_URL / ANTHROPIC_BASE_URL = this run's gateway)─> gateway ─> Anthropic
+```
+
+- **Env:** `FERMAT_SHIM` (the shim), `FERMAT_BIN` (the `fermat` CLI for whoami/`--version`; default:
+  a sibling `fermat` next to the shim), `FERMAT_CLAUDE_BIN` (the real claude Fermat wraps;
+  `claude-anthropic` by default). Fermat's own upstream var —
+  `FERMAT_UPSTREAM_BASE_URL`/`FERMAT_PROXY_BASE_URL` — are CANDIDATES to confirm at box smoke
+  (forwarded verbatim if the operator sets them).
+- **Readiness gates (fail-closed):** the shim exists and runs `--version`, AND `fermat whoami`
+  confirms an entitled/logged-in account — else SKIP ("Fermat not entitled — the arm would silently
+  run vanilla", per their RUNBOOK). Records the fermat runtime version.
+- **Launch fermat:** `FERMAT_SHIM=~/fermat/bin/claude make bench ARMS=fermat` with a shared
+  `anthropic`-mode gateway at `CCB_GATEWAY_URL`.
+
 
 ### Adding a new arm
 1. Create `arms/<name>.py`, subclass one of the three patterns, set `name`/`needs`,

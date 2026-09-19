@@ -1,5 +1,10 @@
 """dasein — thin client for the hosted Dasein compression service (ProxyArm + harness hooks).
 
+DEPRECATED (2026-09): the July "dasein" arm (hosted service + DASEIN_HOOK_CMD hook-runner)
+is obsolete. Today's Dasein product ships as the `parsec` binary + Claude Code plugin +
+hosted brain — use the ``parsec`` (bench) and ``parsec_prod`` (raw product) arms instead.
+This arm is kept REGISTERED for reproducing the July baseline only; do not use it for new runs.
+
 The Dasein arm reaches a hosted compression service over the wire; this public repo contains no
 vendor internals. It works across two seams:
 
