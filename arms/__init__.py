@@ -15,6 +15,9 @@ attach. The actual compression always happens on the other side of the wire.
 from __future__ import annotations
 
 # Import each arm module for its registration side-effect. Keep alphabetical.
-from . import bear, caveman, compresr, dasein, edgee, headroom, rtk, woz  # noqa: F401
+from . import (  # noqa: F401
+    bear, caveman, compresr, dasein, edgee, headroom, parsec,
+    parsec_prod, rtk, woz,
+)
 
 __all__ = ["bear", "caveman", "compresr", "dasein", "edgee", "headroom", "rtk", "woz"]
