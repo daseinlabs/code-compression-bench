@@ -79,10 +79,15 @@ def test_ready_skips_without_credentials(monkeypatch, tmp_path):
     assert "credentials not found" in reason
 
 
-def _prep_probe(monkeypatch, tmp_path, ckpt_result):
-    """Set up a ready() that reaches the live brain probe, stubbing the spawn."""
+def _prep_probe(monkeypatch, tmp_path, *, conv=(True, ""),
+                brain=(True, "https://brain.getparsec.ai", "brain-api/v2", "sha256:abc123"),
+                cf=(True, "1/1 savings-ledger rows carry a counterfactual")):
+    """Set up a ready() that reaches the evidence-based brain gate, stubbing the
+    spawn + the three probe signals (a real conversation through the gateway, the
+    proxy 'brain scorer active' log scan, and the counterfactual ledger check)."""
     monkeypatch.setenv("PARSEC_BIN", "parsec")
     monkeypatch.setenv("PARSEC_PLUGIN_DIR", _make_plugin_dir(tmp_path))
+    monkeypatch.setenv("CCB_GATEWAY_URL", "http://127.0.0.1:8080")  # live upstream to probe
     cred = tmp_path / "credentials.json"
     cred.write_text("{}")
     monkeypatch.setattr(pmod, "_resolve_bin", lambda: "/usr/bin/parsec")
@@ -90,32 +95,67 @@ def _prep_probe(monkeypatch, tmp_path, ckpt_result):
     monkeypatch.setattr(pmod, "_parsec_version", lambda b: "parsec 0.2.19")
     monkeypatch.setattr(pmod._ParsecProxy, "start", lambda self, **kw: self)
     monkeypatch.setattr(pmod._ParsecProxy, "stop", lambda self: None)
-    monkeypatch.setattr(pmod, "_probe_checkpoint", lambda base: ckpt_result)
+    monkeypatch.setattr(pmod, "_drive_curation_probe", lambda base: conv)
+    monkeypatch.setattr(pmod, "_scan_proxy_log", lambda home: brain)
+    monkeypatch.setattr(pmod, "_ledger_has_counterfactual", lambda path: cf)
+
+
+def test_ready_fail_closed_without_gateway(monkeypatch, tmp_path):
+    _clear(monkeypatch)
+    _prep_probe(monkeypatch, tmp_path)
+    monkeypatch.delenv("CCB_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("PARSEC_READY_UPSTREAM", raising=False)
+    ok, reason = ParsecArm().ready()
+    assert not ok
+    assert "live" in reason.lower() and "upstream" in reason.lower()
 
 
 def test_ready_fail_closed_when_no_brain(monkeypatch, tmp_path):
     _clear(monkeypatch)
-    _prep_probe(monkeypatch, tmp_path, (False, ""))
+    # proxy came up + curated, but its log never printed 'brain scorer active'
+    _prep_probe(monkeypatch, tmp_path, brain=(False, "", "", ""))
     ok, reason = ParsecArm().ready()
     assert not ok
-    assert "no brain checkpoint" in reason
+    assert "brain scorer active" in reason
     assert "passthrough" in reason  # never a mislabeled passthrough run
 
 
-def test_ready_ok_records_checkpoint_and_version(monkeypatch, tmp_path):
+def test_ready_fail_closed_when_no_counterfactual(monkeypatch, tmp_path):
     _clear(monkeypatch)
-    _prep_probe(monkeypatch, tmp_path, (True, "sha256:abc123"))
+    # brain active, but no savings-ledger row carried a counterfactual
+    _prep_probe(monkeypatch, tmp_path, cf=(False, "0 savings-ledger rows"))
+    ok, reason = ParsecArm().ready()
+    assert not ok
+    assert "counterfactual" in reason
+
+
+def test_ready_ok_records_brain_provenance_and_version(monkeypatch, tmp_path):
+    _clear(monkeypatch)
+    _prep_probe(monkeypatch, tmp_path)
     arm = ParsecArm()
     ok, reason = arm.ready()
-    assert ok
+    assert ok, reason
     assert arm.checkpoint_id == "sha256:abc123"
+    assert arm.brain_url == "https://brain.getparsec.ai"
+    assert arm.brain_contract == "brain-api/v2"
     assert arm.parsec_version == "parsec 0.2.19"
-    assert "abc123" in reason
+    assert "brain-api/v2" in reason
+
+
+def test_ready_checkpoint_defaults_to_served_by_when_brain_gives_none(monkeypatch, tmp_path):
+    _clear(monkeypatch)
+    # brain active but log carried no checkpoint sha -> record a non-faked marker
+    _prep_probe(monkeypatch, tmp_path,
+                brain=(True, "https://brain.getparsec.ai", "brain-api/v2", ""))
+    arm = ParsecArm()
+    ok, reason = arm.ready()
+    assert ok, reason
+    assert arm.checkpoint_id == "served-by:brain.getparsec.ai"
 
 
 def test_ready_ckpt_mismatch_is_contaminated(monkeypatch, tmp_path):
     _clear(monkeypatch)
-    _prep_probe(monkeypatch, tmp_path, (True, "sha256:abc123"))
+    _prep_probe(monkeypatch, tmp_path)  # brain returns sha256:abc123
     monkeypatch.setenv("PARSEC_BENCH_CKPT_SHA256", "sha256:different")
     ok, reason = ParsecArm().ready()
     assert not ok

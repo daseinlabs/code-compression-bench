@@ -190,6 +190,8 @@ class RunRecord:
     # alongside for provenance / internal measurement only.
     checkpoint_id: str = ""        # parsec brain bundle sha (identifies the served model)
     parsec_version: str = ""       # parsec binary version on the wire
+    brain_url: str = ""            # parsec hosted brain base URL (from the proxy 'brain scorer active' log)
+    brain_contract: str = ""       # parsec brain contract id (e.g. brain-api/v2), from that log line
     fermat_version: str = ""       # fermat runtime version on the wire
     conv_id: str = ""              # conversation/run id the product proxy keyed on
     ledger_summary: dict = field(default_factory=dict)  # counterfactual-vs-billed rollup

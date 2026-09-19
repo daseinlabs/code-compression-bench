@@ -276,6 +276,141 @@ def _probe_checkpoint(base_url: str) -> tuple[bool, str]:
     return False, ""
 
 
+# _CCB_READINESS_V2: evidence-based gate helpers (real probe, not a status route).
+def _scan_proxy_log(home_dir: str) -> tuple[bool, str, str, str]:
+    """Scan the spawned proxy's own log for the ``brain scorer active`` line.
+
+    Returns ``(brain_active, brain_url, brain_contract, checkpoint_id)``. Reads
+    ``<home>/.parsec/proxy.log`` (plus any ``*.log`` beside it), stripping ANSI.
+    A brain-less / fail-open proxy never prints ``brain scorer active`` -- so its
+    absence is proof the brain is NOT engaged."""
+    import glob, re
+    logs = [os.path.join(home_dir, ".parsec", "proxy.log")]
+    logs += sorted(glob.glob(os.path.join(home_dir, ".parsec", "*.log")))
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    active = False
+    url = ""
+    contract = ""
+    ckpt = ""
+    seen = set()
+    for lp in logs:
+        if lp in seen or not os.path.exists(lp):
+            continue
+        seen.add(lp)
+        try:
+            with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                text = ansi.sub("", f.read())
+        except Exception:
+            continue
+        for line in text.splitlines():
+            if "brain scorer active" in line:
+                active = True
+                m = re.search(r"url=(\S+)", line)
+                if m:
+                    url = m.group(1)
+                m = re.search(r"brain scorer active\s*[\u2014\-]+\s*(\S+)", line)
+                if m:
+                    contract = m.group(1)
+            m = re.search(r"checkpoint[_-]?id[=:\s]+([0-9a-fA-F]{8,})", line)
+            if m:
+                ckpt = m.group(1)
+            if not ckpt:
+                m = re.search(r"bundle[=:\s]+([0-9a-fA-F]{8,})", line)
+                if m:
+                    ckpt = m.group(1)
+    return active, url, contract, ckpt
+
+
+def _ledger_has_counterfactual(ledger_path: str) -> tuple[bool, str]:
+    """True iff the ledger has >=1 ``savings-ledger/v0`` row with a NON-NULL
+    ``counterfactual_input_tokens`` (i.e. the counterfactual probe actually
+    fired). Fails closed on a missing/empty ledger."""
+    if not ledger_path or not os.path.exists(ledger_path):
+        return False, f"no ledger at {ledger_path}"
+    n_rows = 0
+    n_cf = 0
+    try:
+        with open(ledger_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("contract_version") != "savings-ledger/v0":
+                    continue
+                n_rows += 1
+                if row.get("counterfactual_input_tokens") is not None:
+                    n_cf += 1
+    except Exception as e:  # noqa: BLE001
+        return False, f"ledger read error: {type(e).__name__}"
+    if n_cf > 0:
+        return True, f"{n_cf}/{n_rows} savings-ledger rows carry a counterfactual"
+    return False, f"{n_rows} savings-ledger rows, none with a non-null counterfactual"
+
+
+def _drive_curation_probe(base_url: str) -> tuple[bool, str]:
+    """Drive ONE real ``/v1/messages`` conversation (a few turns + a fat
+    tool_result) through the spawned proxy so the hosted brain curates it and the
+    counterfactual probe fires. Returns ``(ok, err)``. Costs a few cents."""
+    import urllib.request
+    import urllib.error
+    model = os.environ.get("MODEL", "claude-sonnet-4-6")
+    line = "2026-01-01T00:00:00Z INFO app: request %06d handled ok latency=12ms path=/api/v1/x\n"
+    big = "".join(line % i for i in range(600))  # ~ several thousand tokens to curate
+    body = {
+        "model": model,
+        "max_tokens": 64,
+        "tools": [{
+            "name": "read_file",
+            "description": "Read a file from disk.",
+            "input_schema": {"type": "object",
+                             "properties": {"path": {"type": "string"}},
+                             "required": ["path"]},
+        }],
+        "messages": [
+            {"role": "user",
+             "content": "You can call tools. Read /var/log/app.log, then answer my question."},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Reading the log file now."},
+                {"type": "tool_use", "id": "toolu_ccbprobe1", "name": "read_file",
+                 "input": {"path": "/var/log/app.log"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_ccbprobe1", "content": big},
+                {"type": "text", "text": "In one word: was the last request handled ok?"},
+            ]},
+        ],
+    }
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/messages", data=data, method="POST",
+        headers={
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": "sk-ant-ccb-readiness-probe",
+            "x-ccb-run-id": "parsec_ready_probe",
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            resp.read()
+            code = resp.getcode()
+        if 200 <= int(code) < 300:
+            return True, ""
+        return False, f"HTTP {code}"
+    except urllib.error.HTTPError as e:  # noqa: BLE001
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        return False, f"HTTP {e.code}: {detail}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {str(e)[:160]}"
+
+
 @register("parsec")
 class ParsecArm(ProxyArm):
     name = "parsec"
@@ -293,6 +428,8 @@ class ParsecArm(ProxyArm):
         self._ledger_path: Optional[str] = None
         self.checkpoint_id = ""
         self.parsec_version = ""
+        self.brain_url = ""
+        self.brain_contract = ""
         self.conv_id = ""
 
     # The proxy is spawned per solve, so the base URL is only known then: return
@@ -306,6 +443,15 @@ class ParsecArm(ProxyArm):
         return {}
 
     def ready(self) -> tuple[bool, str]:
+        # _CCB_READINESS_V2: evidence-based, fail-closed. Spawn the proxy once
+        # against the shared gateway, drive a real /v1/messages conversation (a
+        # fat tool_result to curate) THROUGH it, then require BOTH:
+        #   (a) the proxy log prints "brain scorer active" (brain engaged, not a
+        #       fail-open passthrough), and
+        #   (b) >=1 savings-ledger/v0 row with a non-null counterfactual (the
+        #       counterfactual probe actually fired).
+        # A brain-less / passthrough proxy satisfies neither, so it can never be
+        # mislabeled "parsec".
         ok, reason = super().ready()  # PARSEC_BIN + PARSEC_PLUGIN_DIR non-empty
         if not ok:
             return ok, reason
@@ -319,39 +465,49 @@ class ParsecArm(ProxyArm):
                            f"plugin (missing .claude-plugin/plugin.json)")
         cred = _credentials_src()
         if not os.path.exists(cred):
-            return False, (f"parsec credentials not found at {cred} — the hosted brain "
+            return False, (f"parsec credentials not found at {cred} -- the hosted brain "
                            f"cannot authenticate (set PARSEC_CREDENTIALS or run `parsec login`)")
         self.parsec_version = _parsec_version(bin_path)
-        # Live probe: spawn once against a throwaway upstream and confirm the brain
-        # is configured (reports a checkpoint_id). A brain-less proxy fail-opens to
-        # passthrough and would mislabel the run — SKIP fail-closed.
-        probe = _ParsecProxy(bin_path, upstream="https://api.anthropic.com",
-                             home_dir=os.path.join(
-                                 os.environ.get("TMPDIR", "/tmp"),
-                                 f"parsec_ready_{os.getpid()}"))
+        gw = (os.environ.get("CCB_GATEWAY_URL", "").strip()
+              or os.environ.get("PARSEC_READY_UPSTREAM", "").strip())
+        if not gw:
+            return False, ("parsec readiness needs a LIVE upstream to probe: start the shared "
+                           "gateway and set CCB_GATEWAY_URL (or PARSEC_READY_UPSTREAM) so the "
+                           "readiness conversation reaches the model and the brain curates it")
+        home = os.path.join(os.environ.get("TMPDIR", "/tmp"),
+                            f"parsec_ready_{os.getpid()}_{int(time.time())}")
+        probe = _ParsecProxy(bin_path, upstream=gw.rstrip("/"), home_dir=home)
         try:
             probe.start()
         except Exception as e:  # noqa: BLE001
             return False, f"parsec proxy failed to start for readiness probe: {e}"
         try:
-            brain_ok, ckpt = _probe_checkpoint(probe.base_url)
+            conv_ok, conv_err = _drive_curation_probe(probe.base_url)
+            brain_ok, brain_url, brain_contract, ckpt = _scan_proxy_log(home)
+            cf_ok, cf_reason = _ledger_has_counterfactual(probe.ledger_path)
         finally:
             probe.stop()
+        if not conv_ok:
+            return False, (f"parsec readiness conversation failed through the gateway "
+                           f"({gw}): {conv_err}")
         if not brain_ok:
-            return False, (
-                "parsec proxy came up but no brain checkpoint could be confirmed via a "
-                "status route (tried "
-                + (os.environ.get("PARSEC_PROXY_STATUS_PATH") or ", ".join(_DEFAULT_STATUS_PATHS))
-                + "). A brain-less proxy fail-opens to passthrough and would mislabel the "
-                "run 'parsec' — refusing. Set PARSEC_PROXY_STATUS_PATH to the confirmed "
-                "status route (box-smoke item).")
-        self.checkpoint_id = ckpt
+            return False, ("parsec proxy came up but its log shows no 'brain scorer active' "
+                           f"line under {home}/.parsec/proxy.log -- the brain is not engaged "
+                           "(fail-open passthrough), refusing to mislabel the run 'parsec'")
+        if not cf_ok:
+            return False, ("parsec proxy is brain-active but produced no savings-ledger/v0 row "
+                           f"with a non-null counterfactual_input_tokens ({cf_reason}) -- the "
+                           "counterfactual probe is not working, refusing")
+        self.brain_url = brain_url
+        self.brain_contract = brain_contract
+        self.checkpoint_id = ckpt or "served-by:brain.getparsec.ai"
         want = os.environ.get("PARSEC_BENCH_CKPT_SHA256", "").strip().lower()
-        if want and ckpt.lower() != want:
-            return False, (f"brain checkpoint_id {ckpt} != expected {want} — refusing: a "
-                           f"benchmark against the wrong bundle is contaminated")
-        return True, (f"ok (bin={bin_path}, plugin={plugin_dir}, ckpt={ckpt or '?'}, "
-                      f"ver={self.parsec_version or '?'})")
+        if want and self.checkpoint_id.lower() != want:
+            return False, (f"brain checkpoint_id {self.checkpoint_id} != expected {want} -- "
+                           f"refusing: a benchmark against the wrong bundle is contaminated")
+        return True, (f"ok (bin={bin_path}, brain={brain_url or '?'} "
+                      f"contract={brain_contract or '?'} ckpt={self.checkpoint_id}, "
+                      f"counterfactual={cf_reason}, ver={self.parsec_version or '?'})")
 
     def start_run(self, ctx) -> Optional[str]:
         bin_path = _resolve_bin()
@@ -375,6 +531,19 @@ class ParsecArm(ProxyArm):
     def end_run(self) -> None:
         proxy, self._proxy = self._proxy, None
         if proxy is not None:
+            # capture brain provenance from the now-populated proxy log
+            try:
+                b_ok, b_url, b_contract, b_ckpt = _scan_proxy_log(proxy.home_dir)
+                if b_url:
+                    self.brain_url = b_url
+                if b_contract:
+                    self.brain_contract = b_contract
+                if b_ckpt:
+                    self.checkpoint_id = b_ckpt
+                elif b_ok and not self.checkpoint_id:
+                    self.checkpoint_id = "served-by:brain.getparsec.ai"
+            except Exception:
+                pass
             proxy.stop()
 
     def ledger_path(self) -> Optional[str]:

@@ -1222,6 +1222,8 @@ def run_agent(
     return {
         "checkpoint_id": getattr(arm, "checkpoint_id", "") or "",
         "parsec_version": getattr(arm, "parsec_version", "") or "",
+        "brain_url": getattr(arm, "brain_url", "") or "",
+        "brain_contract": getattr(arm, "brain_contract", "") or "",
         "fermat_version": getattr(arm, "fermat_version", "") or "",
         "conv_id": getattr(arm, "conv_id", "") or run_id,
         "ledger_summary": _ledger_summary,
@@ -1397,6 +1399,8 @@ def _worker(job: tuple) -> dict:
             # ── product-arm diagnostics (default "" / {} for every other arm) ──
             checkpoint_id=raw.get("checkpoint_id", ""),
             parsec_version=raw.get("parsec_version", ""),
+            brain_url=raw.get("brain_url", ""),
+            brain_contract=raw.get("brain_contract", ""),
             fermat_version=raw.get("fermat_version", ""),
             conv_id=raw.get("conv_id", ""),
             ledger_summary=raw.get("ledger_summary", {}) or {},
