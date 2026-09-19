@@ -16,8 +16,9 @@ from __future__ import annotations
 
 # Import each arm module for its registration side-effect. Keep alphabetical.
 from . import (  # noqa: F401
-    bear, caveman, compresr, dasein, edgee, headroom, parsec,
+    bear, caveman, compresr, dasein, edgee, fermat, headroom, parsec,
     parsec_prod, rtk, woz,
 )
 
-__all__ = ["bear", "caveman", "compresr", "dasein", "edgee", "headroom", "rtk", "woz"]
+__all__ = ["bear", "caveman", "compresr", "dasein", "edgee", "fermat",
+           "headroom", "parsec", "parsec_prod", "rtk", "woz"]
