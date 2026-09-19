@@ -52,6 +52,26 @@ _NOT_ENTITLED_HINTS = ("not logged in", "not logged-in", "no account", "unauthen
                        "please log in", "please login", "run `fermat login`",
                        "not entitled", "logged out", "no active")
 
+# ClaudeAgentOptions field names (across SDK versions) that point the SDK at a
+# specific `claude` executable. _run_sdk tries the same candidate names to place cli_path.
+CLI_PATH_FIELD_CANDIDATES = ("cli_path", "path_to_claude_code_executable",
+                            "claude_code_executable", "claude_executable", "executable")
+
+
+def _sdk_cli_path_field() -> Optional[str]:
+    """The installed SDK's ClaudeAgentOptions field for a custom executable, or
+    None. Lazy import (the SDK is absent on dev boxes)."""
+    try:
+        import dataclasses as _dc
+        from claude_agent_sdk import ClaudeAgentOptions  # lazy
+        fields = {f.name for f in _dc.fields(ClaudeAgentOptions)}
+    except Exception:
+        return None
+    for cand in CLI_PATH_FIELD_CANDIDATES:
+        if cand in fields:
+            return cand
+    return None
+
 
 def _resolve_fermat_cli() -> Optional[str]:
     """Resolve the `fermat` CLI (whoami/--version): FERMAT_BIN, else a sibling
@@ -132,4 +152,13 @@ class FermatArm(Arm):
                            "(their RUNBOOK says so). `fermat whoami` did not confirm a "
                            f"logged-in/entitled account (rc={who.returncode}): "
                            f"{text[:160]!r}")
-        return True, (f"ok (shim={shim}, ver={self.fermat_version or '?'}, whoami confirmed)")
+        # Fail-closed: the SDK must expose a field to point its executable at the
+        # shim, else the run would silently use the stock `claude` (not Fermat).
+        field = _sdk_cli_path_field()
+        if field is None:
+            return False, ("installed Claude Agent SDK exposes no cli-path field on "
+                           f"ClaudeAgentOptions (tried {CLI_PATH_FIELD_CANDIDATES}); the run "
+                           "would silently use the stock claude, not the Fermat shim — "
+                           "refusing. Confirm the field name for the pinned SDK (box smoke).")
+        return True, (f"ok (shim={shim}, ver={self.fermat_version or '?'}, "
+                      f"whoami confirmed, sdk_cli_field={field})")

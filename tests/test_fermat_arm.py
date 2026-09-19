@@ -48,6 +48,8 @@ def _prep(monkeypatch, tmp_path, **run_kw):
     monkeypatch.setattr(fmod, "_resolve_fermat_cli", lambda: "fermat")
     monkeypatch.setattr(fmod, "_fermat_version", lambda cli: "fermat 0.1.10")
     monkeypatch.setattr(fmod.subprocess, "run", _fake_run(**run_kw))
+    # SDK is absent on the dev box; pretend ClaudeAgentOptions exposes a cli-path field
+    monkeypatch.setattr(fmod, "_sdk_cli_path_field", lambda: "cli_path")
 
 
 def test_ready_skips_without_shim(monkeypatch):
