@@ -135,6 +135,18 @@ def _install_sdk_stub() -> dict:
     mod.ResultMessage = ResultMessage
     mod.AssistantMessage = AssistantMessage
     mod.query = query
+    # Mirror the SDK surface cc_runner lazily imports for the step0/brief
+    # in-process MCP injection (added after this stub was first written).
+    if not hasattr(mod, "create_sdk_mcp_server"):
+        def _create_sdk_mcp_server(name=None, tools=None, **_kw):  # noqa: ANN001
+            return {"type": "sdk_mcp", "name": name, "tools": list(tools or [])}
+        mod.create_sdk_mcp_server = _create_sdk_mcp_server
+    if not hasattr(mod, "tool"):
+        def _tool(*_a, **_k):  # noqa: ANN001
+            def _wrap(fn):
+                return fn
+            return _wrap
+        mod.tool = _tool
     sys.modules["claude_agent_sdk"] = mod
     return capture
 
@@ -244,7 +256,10 @@ def test_step0_injection_prepends_to_system_prompt():
     sp = opts.system_prompt
     assert isinstance(sp, dict), sp
     assert sp["type"] == "preset" and sp["preset"] == "claude_code"
-    assert sp["append"] == Step0Arm.BRIEF
+    # system_prompt_append carries the step0 brief PLUS the per-run prompt-cache
+    # isolation tag cc_runner appends during opts assembly (ccbench-cache-iso).
+    assert sp["append"].startswith(Step0Arm.BRIEF)
+    assert "<!-- ccbench-cache-iso:" in sp["append"]
 
 
 def test_stop_decision_finalize_ends_loop():

@@ -250,7 +250,7 @@ def test_setup_raises_stale_session_error_on_stale_token():
     un-self-healable cause), which still IS-A WozLoginError (fail-closed mapping)."""
     with tempfile.TemporaryDirectory() as td:
         root = _make_plugin_tree(Path(td))
-        with _fake_node(
+        with _fake_node(status_rc=1, 
             login_stdout="Error: WozCode session is stale. Please log in again using /woz-login.",
             login_rc=1,
         ) as node:
@@ -280,7 +280,7 @@ def test_setup_classifies_stale_when_marker_is_above_a_long_stack_trace():
     blob / head, like ready()/_session_authenticated)."""
     with tempfile.TemporaryDirectory() as td:
         root = _make_plugin_tree(Path(td))
-        with _fake_node(
+        with _fake_node(status_rc=1, 
             login_stdout="Error: WozCode session is stale. Please log in again using /woz-login.",
             login_rc=1,
             login_tail_lines=20,  # ~20*50 = 1000 chars of stack AFTER the marker
@@ -304,7 +304,7 @@ def test_setup_raises_generic_login_error_on_other_failure():
     marker) stays a generic WozLoginError, NOT misclassified as stale."""
     with tempfile.TemporaryDirectory() as td:
         root = _make_plugin_tree(Path(td))
-        with _fake_node(login_stdout="Error: network unreachable (ECONNREFUSED)",
+        with _fake_node(status_rc=1, login_stdout="Error: network unreachable (ECONNREFUSED)",
                         login_rc=1) as node:
             with _env(WOZ_API_KEY="k", WOZ_PLUGIN_DIR=str(root), WOZ_NODE=node):
                 raised = None
