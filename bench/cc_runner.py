@@ -83,7 +83,7 @@ from typing import Optional
 
 # arms self-register on import of the package; the registry lives in bench.arm.
 import arms  # noqa: F401  (import side effect: registers every arm)
-from bench.arm import ArmKind, get_arm, available_arms
+from bench.arm import ArmKind, RunContext, get_arm, available_arms
 from bench.grader import SWEBenchGrader
 from bench.pricing import price_run, rates_for
 from bench.schema import RunRecord
@@ -335,6 +335,22 @@ def build_arm_config(arm) -> _ArmConfig:
     # compression layer above the gateway). A TransformArm has no server-side seam
     # under Claude Code (the SDK owns the message array), so it runs as the control
     # here; client-side transforms are out of scope for the Claude Code harness.
+
+    # A ProxyArm may ALSO carry a plugin (parsec = proxy + plugin): honour a
+    # plugin_dir attribute the SAME way the TOOL branch honours ToolAttach.plugin_dir,
+    # loading the shipped plugin's tools/hooks/skills alongside the proxy. Guarded on
+    # `not cfg.plugins` so a TOOL arm (already wired above) is never double-loaded.
+    plugin_dir = getattr(arm, "plugin_dir", None)
+    if plugin_dir and not cfg.plugins:
+        cfg.plugins = [{"type": "local", "path": os.path.abspath(plugin_dir)}]
+        globs = list(getattr(arm, "plugin_tool_globs", []) or [])
+        if getattr(arm, "replace_tools", False):
+            cfg.disallowed_tools = list(_PLUGIN_NATIVE_DISALLOWED)
+            cfg.allowed_tools = ["Bash", "TodoWrite", "Agent"] + globs
+        else:
+            # parsec does NOT remove native tools: keep the native surface and ADD
+            # the plugin's tools + Agent (so plugin subagents can be delegated to).
+            cfg.allowed_tools = list(DEFAULT_ALLOWED_TOOLS) + ["Agent"] + globs
     return cfg
 
 
@@ -529,7 +545,8 @@ async def _run_sdk(
     # gateway reads RUN_ID_HEADER off it to tag usage into the right per-run JSONL.
     # (For proxy arms the vendor proxy must forward this header to the gateway —
     # smoke item; see the report.)
-    env["ANTHROPIC_CUSTOM_HEADERS"] = f"{RUN_ID_HEADER}: {run_id}"
+    if not getattr(arm_cfg.setup_arm, "raw_product", False):
+        env["ANTHROPIC_CUSTOM_HEADERS"] = f"{RUN_ID_HEADER}: {run_id}"
     # The per-(instance,arm) run id, also exported as CCB_RUN_ID so an arm that keys per-run state
     # on it (e.g. dasein's conversation id, used to hold one live session per solve) reads the
     # SAME stable id Claude Code forwards as the run-id header. Documentation-honesty: makes the
@@ -540,8 +557,13 @@ async def _run_sdk(
     # but the real Vertex credential is ADC held by the gateway. We set
     # ANTHROPIC_AUTH_TOKEN (a bridge token) and clear ANTHROPIC_API_KEY so Claude
     # Code uses the bearer path to the proxy/gateway, not a real Anthropic key.
-    env["ANTHROPIC_AUTH_TOKEN"] = BRIDGE_AUTH_TOKEN
-    env.pop("ANTHROPIC_API_KEY", None)
+    if getattr(arm_cfg.setup_arm, "raw_product", False):
+        # ZERO harness interposition: keep the REAL ANTHROPIC_API_KEY so the
+        # product's own proxy (ANTHROPIC_BASE_URL) authenticates upstream; no bridge token.
+        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    else:
+        env["ANTHROPIC_AUTH_TOKEN"] = BRIDGE_AUTH_TOKEN
+        env.pop("ANTHROPIC_API_KEY", None)
     # Per-instance test environment: prepare_repos builds an isolated venv (exact/nearest
     # Python + `pip install -e .` + the SWE-bench spec deps) at <repo_root>/.venvs/<iid>,
     # a SIBLING of the worktree (cwd). Point the agent's PATH/VIRTUAL_ENV at it so
@@ -650,10 +672,33 @@ For hard tasks the brief is still a strong starting point but it is likely incom
         sys_append = _BRIEF_PREFIX + sys_append + _BRIEF_SUFFIX
     sys_append = (sys_append or "") + ("\n<!-- ccbench-cache-iso:%s -->" % run_id)
     system_prompt = {"type": "preset", "preset": "claude_code", "append": sys_append}
+    _arm = arm_cfg.setup_arm
+    # Per-arm turn cap: an arm may request unlimited turns (max_turns=None).
+    effective_call_cap = None if getattr(_arm, "unlimited_turns", False) else call_cap
+    # raw_product arms run with ZERO harness interposition: strip PreToolUse/Stop hooks.
+    _raw_product = getattr(_arm, "raw_product", False)
+    effective_hooks = None if _raw_product else sdk_hooks
+    _effective_include_hooks = (not _raw_product) and (has_plugins or bool(sdk_hooks))
+    # OPTIONAL: point the SDK at a different `claude` executable (fermat's shim). The
+    # exact ClaudeAgentOptions field name varies across SDK versions, so use whichever
+    # the installed SDK exposes (box-smoke confirms the name for the pinned version).
+    _extra_opts: dict = {}
+    _cli_path = getattr(_arm, "cli_path", None)
+    if _cli_path:
+        import dataclasses as _dc
+        try:
+            _optfields = {f.name for f in _dc.fields(ClaudeAgentOptions)}
+        except TypeError:
+            _optfields = set()
+        for _cand in ("cli_path", "path_to_claude_code_executable",
+                      "claude_code_executable", "claude_executable", "executable"):
+            if _cand in _optfields:
+                _extra_opts[_cand] = _cli_path
+                break
     options = ClaudeAgentOptions(
         allowed_tools=allowed_tools,
         disallowed_tools=arm_cfg.disallowed_tools,
-        max_turns=call_cap,
+        max_turns=effective_call_cap,
         cwd=cwd,
         model=model,
         mcp_servers=mcp_servers,
@@ -663,7 +708,7 @@ For hard tasks the brief is still a strong starting point but it is likely incom
         plugins=arm_cfg.plugins or None,
         # an arm's harness-level hooks (PreToolUse rewrite / Stop loop-control). None
         # for arms that declare none — the SDK call is then identical to before.
-        hooks=sdk_hooks,
+        hooks=effective_hooks,
         # an arm's step0 brief appended to the stock claude_code system prompt.
         system_prompt=system_prompt,
         env=env,
@@ -676,11 +721,12 @@ For hard tasks the brief is still a strong starting point but it is likely incom
         strict_mcp_config=not has_plugins,
         # surface hook lifecycle events in the stream when EITHER a plugin ships its
         # own hooks OR an arm declared harness-level hooks (so they actually fire).
-        include_hook_events=has_plugins or bool(sdk_hooks),
+        include_hook_events=_effective_include_hooks,
         # Per-arm thinking override: some vendor proxies (compresr Context-Gateway) corrupt the
         # extended-thinking signature on multi-turn replay. Env-gated so ONLY those runs disable
         # thinking; default None = stock adaptive thinking for every other arm.
         thinking=({"type": "disabled"} if os.environ.get("CCB_THINKING_DISABLED") == "1" else None),
+        **_extra_opts,
     )
 
     messages: list[dict] = []
@@ -864,7 +910,7 @@ def _reap_orphan_claude() -> int:
 
 
 # ── gateway resolution: SHARED standalone vs per-(instance,arm) ephemeral ─────
-def _resolve_gateway(out_dir: str, run_id: str, wall_cap_s: int):
+def _resolve_gateway(out_dir: str, run_id: str, wall_cap_s: int, bypass_gateway: bool = False):
     """Resolve the bottom-bridge gateway for this solve.
 
     Returns ``(base_url, usage_path, stop_fn)``:
@@ -881,6 +927,11 @@ def _resolve_gateway(out_dir: str, run_id: str, wall_cap_s: int):
         its ``base_url`` / ``usage_path(run_id)`` / ``stop`` so the solve is
         byte-for-byte what it was before the shared-gateway option existed.
     """
+    if bypass_gateway:
+        # raw_product arms (parsec_prod) run with NO gateway: Claude Code talks to
+        # the product proxy directly. Cost comes from the SDK result + product
+        # ledger, not from gateway usage rows (this path stays empty).
+        return "", UsageSink(str(Path(out_dir) / "usage")).path_for(run_id), (lambda: None)
     if SHARED_GATEWAY_URL:
         usage_dir = SHARED_GATEWAY_USAGE_DIR or str(Path(out_dir) / "usage")
         # Reuse UsageSink's path/sanitization so the file name matches the one the
@@ -973,13 +1024,34 @@ def run_agent(
     # full back-compat). gateway_base_url/gateway_usage_path/stop_gateway abstract
     # the two so the rest of the solve is identical.
     gateway_base_url, gateway_usage_path, stop_gateway = _resolve_gateway(
-        out_dir, run_id, wall_cap_s)
+        out_dir, run_id, wall_cap_s,
+        bypass_gateway=getattr(arm, "raw_product", False))
 
     # Where Claude Code points: the vendor proxy (proxy arms) or the gateway
     # directly (A0/woz). For proxy arms the vendor proxy's UPSTREAM must be this
     # gateway URL — a provisioning requirement we log so it can be verified. We
     # also surface the gateway URL plainly so provisioning can confirm each
     # vendor's configured upstream == CCB_GATEWAY_URL.
+    # ── per-solve arm lifecycle: bring up any proxy the arm spawns for THIS run.
+    # Its upstream MUST be gateway_base_url (the bottom bridge) so usage is still
+    # captured; start_run() returns a base URL that overrides where Claude Code
+    # points (end_run() tears it down in the finally + happy-path below).
+    arm_run_dir = os.path.join(out_dir, "arm_state", f"{instance_id}__{arm.name}")
+    os.makedirs(arm_run_dir, exist_ok=True)
+    try:
+        _start_override = arm.start_run(
+            RunContext(upstream_base_url=gateway_base_url, run_dir=arm_run_dir, run_id=run_id))
+    except Exception as e:  # noqa: BLE001 — a proxy that won't come up is an infra fault
+        try:
+            stop_gateway()
+        except Exception:
+            pass
+        raise RunInfraError(f"arm.start_run() failed for '{arm.name}': "
+                            f"{type(e).__name__}: {str(e)[:200]}") from e
+    if _start_override:
+        arm_cfg.client_base_url = _start_override
+        arm_cfg.proxy_base_url = _start_override
+
     client_base_url = arm_cfg.client_base_url or gateway_base_url
     if arm_cfg.proxy_base_url:
         print(f"  chain [{arm.name}]: ClaudeCode -> {arm_cfg.proxy_base_url} "
@@ -1036,6 +1108,10 @@ def run_agent(
             stop_gateway()
             raise RunInfraError(f"{type(e).__name__}: {str(e)[:300]}", usage=_failed_usage) from e
     finally:
+        try:
+            arm.end_run()
+        except Exception:
+            pass
         stop_gateway()
         try:
             arm.teardown()
@@ -1118,7 +1194,37 @@ def run_agent(
     hit_cap = exit_status == "wall_cap" or "max_turns" in el or "max_budget" in el or calls >= call_cap
     limit_death = hit_cap and not submitted
 
+    # ── product-arm diagnostics (parsec / parsec_prod / fermat): copy the product
+    # ledger into the run dir and summarise it (counterfactual vs billed; null-probe
+    # rows excluded). Provenance only — the ranking cost is still the price-table
+    # over the gateway usage rows, identical for every arm.
+    try:
+        arm.end_run()
+    except Exception:
+        pass
+    _ledger_summary: dict = {}
+    try:
+        _lp = arm.ledger_path()
+    except Exception:
+        _lp = None
+    if _lp and os.path.exists(_lp):
+        try:
+            _dst = os.path.join(arm_run_dir, "ledger.jsonl")
+            if os.path.abspath(_lp) != os.path.abspath(_dst):
+                shutil.copyfile(_lp, _dst)
+        except Exception:
+            pass
+        try:
+            _ledger_summary = arm.ledger_summary(run_id) or {}
+        except Exception as _e:  # noqa: BLE001 — diagnostics never fail a solve
+            _ledger_summary = {"error": f"{type(_e).__name__}: {str(_e)[:120]}"}
+
     return {
+        "checkpoint_id": getattr(arm, "checkpoint_id", "") or "",
+        "parsec_version": getattr(arm, "parsec_version", "") or "",
+        "fermat_version": getattr(arm, "fermat_version", "") or "",
+        "conv_id": getattr(arm, "conv_id", "") or run_id,
+        "ledger_summary": _ledger_summary,
         "instance": instance_id,
         "arm": arm.name,
         "patch": patch,
@@ -1288,6 +1394,12 @@ def _worker(job: tuple) -> dict:
             usage=raw["usage"],
             infra_failed=False,
             error=("grade: " + g.error) if g.error else "",
+            # ── product-arm diagnostics (default "" / {} for every other arm) ──
+            checkpoint_id=raw.get("checkpoint_id", ""),
+            parsec_version=raw.get("parsec_version", ""),
+            fermat_version=raw.get("fermat_version", ""),
+            conv_id=raw.get("conv_id", ""),
+            ledger_summary=raw.get("ledger_summary", {}) or {},
         )
         run_record = rec.to_json()
 

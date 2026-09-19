@@ -182,6 +182,18 @@ class RunRecord:
     requests: int = 0
     haiku_requests: int = 0
 
+    # ── product-arm diagnostics (parsec / parsec_prod / fermat) ──────────────
+    # All optional + defaulted, so ledger back-compat holds both directions:
+    # asdict() emits them with defaults for old-style records, and from_json()
+    # already drops unknown keys. The RANKING cost is unchanged (still the
+    # price-table over the gateway usage rows for every arm); these are recorded
+    # alongside for provenance / internal measurement only.
+    checkpoint_id: str = ""        # parsec brain bundle sha (identifies the served model)
+    parsec_version: str = ""       # parsec binary version on the wire
+    fermat_version: str = ""       # fermat runtime version on the wire
+    conv_id: str = ""              # conversation/run id the product proxy keyed on
+    ledger_summary: dict = field(default_factory=dict)  # counterfactual-vs-billed rollup
+
     def to_json(self) -> dict:
         """Plain dict for one ledger line."""
         return asdict(self)

@@ -129,6 +129,23 @@ class ToolAttach:
     server_env: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class RunContext:
+    """Per-solve context handed to Arm.start_run().
+
+    upstream_base_url : the run's gateway URL — a proxy an arm spawns MUST set
+                        this as its own upstream so the gateway still captures the
+                        real post-compression usage (the bottom bridge).
+    run_dir           : a per-(instance, arm) scratch dir the arm may use (e.g. an
+                        isolated proxy HOME); created by the runner before the call.
+    run_id            : the x-ccb-run-id the gateway keys usage on (also the CC
+                        session/conv tag a product proxy can echo into its ledger).
+    """
+    upstream_base_url: str
+    run_dir: str
+    run_id: str
+
+
 class Arm(abc.ABC):
     """Base adapter every arm subclasses (indirectly, via one of the 3 patterns).
 
@@ -141,6 +158,13 @@ class Arm(abc.ABC):
     name: str = "arm"
     kind: ArmKind = ArmKind.BASELINE
     needs: list[str] = []
+
+    # ── per-arm run policy (defaults preserve legacy behaviour for every arm) ──
+    unlimited_turns: bool = False   # True -> the runner passes max_turns=None (no cap)
+    raw_product: bool = False       # True -> the shipped product with ZERO harness
+                                    #   interposition: Claude Code gets the REAL
+                                    #   ANTHROPIC_API_KEY (not the bridge token), no
+                                    #   gateway run-id header, and no harness hooks.
 
     def ready(self) -> tuple[bool, str]:
         """Whether this arm can run now. Returns (ok, reason).
@@ -160,6 +184,32 @@ class Arm(abc.ABC):
     def teardown(self) -> None:
         """Optional cleanup after a batch of runs (e.g. close a session/MCP).
         No-op by default."""
+
+    # ── per-SOLVE lifecycle (default no-ops) ─────────────────────────────────
+    # setup()/teardown() bracket a whole batch; these bracket ONE (instance, arm)
+    # solve. A ProxyArm that spawns its own proxy per solve (parsec) uses
+    # start_run() to bring it up bound to THIS run's gateway and returns the proxy
+    # base URL to override Claude Code's ANTHROPIC_BASE_URL; end_run() tears it
+    # down; ledger_path() exposes a product ledger to copy/summarise afterwards.
+    def start_run(self, ctx: "RunContext") -> Optional[str]:
+        """Bring up per-solve state. Return a base URL that overrides the client's
+        ANTHROPIC_BASE_URL (e.g. a freshly-spawned proxy), or None to keep the
+        default (gateway, or a ProxyArm's model_base_url()). No-op by default."""
+        return None
+
+    def end_run(self) -> None:
+        """Tear down per-solve state started in start_run(). No-op by default."""
+
+    def ledger_path(self) -> Optional[str]:
+        """Path to a product usage ledger written during the solve, to be copied
+        into the run dir and summarised as diagnostics. None if the arm has none."""
+        return None
+
+    def ledger_summary(self, run_id: str = "") -> dict:
+        """Roll up this arm's product ledger for one run (counterfactual vs billed,
+        null-probe rows excluded) as RunRecord diagnostics. The arm owns its ledger
+        format — the harness never parses vendor files. {} by default."""
+        return {}
 
     # ── OPTIONAL harness-level hooks (default no-ops) ────────────────────────
     # These let an arm declare behaviour the Claude Agent SDK supports at the
@@ -265,6 +315,14 @@ class ProxyArm(Arm):
     """
 
     kind = ArmKind.PROXY
+
+    # OPTIONAL: a ProxyArm may ALSO ship a Claude Code plugin (parsec = proxy +
+    # plugin). When plugin_dir is set, build_arm_config loads it via the SDK
+    # plugins=[{"type":"local","path":...}] mechanism (the same one the woz
+    # ToolArm uses) IN ADDITION to pointing ANTHROPIC_BASE_URL at the proxy.
+    plugin_dir: Optional[str] = None
+    plugin_tool_globs: list[str] = []
+    replace_tools: bool = False
 
     @abc.abstractmethod
     def model_base_url(self) -> str:
