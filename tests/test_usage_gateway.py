@@ -49,7 +49,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from bench.usage_gateway import (  # noqa: E402
-    MODE_PASSTHROUGH, RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
+    MODE_ANTHROPIC, MODE_PASSTHROUGH, RUN_ID_HEADER, UsageGateway, extract_usage, usage_from_sse,
     _anthropic_create_kwargs, _strip_vertex_prefix,
     _accumulate_anthropic_message, _event_type, _event_data,
 )
@@ -669,6 +669,120 @@ def test_vertex_gateway_upstream_error_is_clean():
         assert "vertex exploded" in json.dumps(err)
     finally:
         gw.stop()
+
+
+# ── anthropic mode (CCB_GATEWAY_MODE=anthropic) ──────────────────────────────
+# The gateway forwards verbatim to api.anthropic.com but injects the gateway's
+# REAL key: Claude Code only ever holds the dummy bridge token. These tests use a
+# mock upstream and assert the key is swapped in, the bridge token never leaves,
+# usage is still recorded per run-id, and the key never leaks into records/logs.
+def _make_recording_upstream():
+    """A mock upstream that records the headers it saw and returns a fixed
+    non-streaming Anthropic-shaped JSON body (with a usage object)."""
+    import json as _json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    seen: dict = {}
+    body = _json.dumps({
+        "id": "msg_1", "type": "message", "role": "assistant",
+        "content": [{"type": "text", "text": "ok"}],
+        "model": "claude-sonnet-4-6",
+        "usage": {"input_tokens": 11, "output_tokens": 5,
+                  "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2},
+    }).encode()
+
+    class _Mock(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # silence
+            return
+
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            seen.update({k.lower(): v for k, v in self.headers.items()})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Mock)
+    Thread(target=srv.serve_forever, daemon=True).start()
+    host, port = srv.server_address
+    return srv, seen, f"http://{host}:{port}"
+
+
+def test_anthropic_mode_constants():
+    from bench.usage_gateway import ANTHROPIC_API_BASE
+    assert MODE_ANTHROPIC == "anthropic"
+    assert ANTHROPIC_API_BASE == "https://api.anthropic.com"
+
+
+def test_anthropic_mode_injects_real_key_and_strips_bridge_token(tmp_path, monkeypatch):
+    import json as _json
+    import urllib.request
+    from pathlib import Path
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-REAL-secret-key")
+    srv, seen, upstream = _make_recording_upstream()
+    tmp = str(tmp_path)
+    gw = UsageGateway(upstream_base=upstream, log_dir=tmp,
+                      default_run_id="rid-anthropic", mode=MODE_ANTHROPIC).start()
+    try:
+        req = urllib.request.Request(
+            gw.base_url + "/v1/messages",
+            data=_json.dumps({"model": "claude-sonnet-4-6", "messages": []}).encode(),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer ccb-bridge-token",  # the dummy CC token
+                "anthropic-version": "2023-06-01",
+                RUN_ID_HEADER: "rid-anthropic",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        assert resp.status == 200
+    finally:
+        gw.stop()
+        srv.shutdown()
+
+    # (1) the gateway replaced the dummy bridge token with the REAL key as x-api-key
+    assert seen.get("x-api-key") == "sk-ant-REAL-secret-key"
+    # (2) the dummy bearer never reached the upstream
+    assert "ccb-bridge-token" not in (seen.get("authorization") or "")
+    assert not seen.get("authorization")
+    # (3) usage was still recorded, keyed by the run-id header (cache split preserved)
+    rows = [_json.loads(l) for l in
+            (Path(tmp) / "rid-anthropic.usage.jsonl").read_text().splitlines() if l.strip()]
+    assert rows and rows[-1]["completion_tokens"] == 5
+    assert rows[-1]["prompt_tokens"] == 11 + 2 + 3  # input + cache_write + cache_read
+    assert rows[-1]["cache_read_input_tokens"] == 3
+    assert rows[-1]["cache_creation_input_tokens"] == 2
+    # (4) the real key NEVER leaks into any recorded usage row
+    assert "sk-ant-REAL-secret-key" not in _json.dumps(rows)
+
+
+def test_anthropic_mode_without_key_does_not_forge_auth(tmp_path, monkeypatch):
+    # Fail-safe: with no key set, the gateway does NOT invent an x-api-key header.
+    import json as _json
+    import urllib.request
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    srv, seen, upstream = _make_recording_upstream()
+    gw = UsageGateway(upstream_base=upstream, log_dir=str(tmp_path),
+                      default_run_id="rid-nokey", mode=MODE_ANTHROPIC).start()
+    try:
+        req = urllib.request.Request(
+            gw.base_url + "/v1/messages",
+            data=_json.dumps({"messages": []}).encode(), method="POST",
+            headers={"Content-Type": "application/json", RUN_ID_HEADER: "rid-nokey"},
+        )
+        urllib.request.urlopen(req, timeout=10)
+    finally:
+        gw.stop()
+        srv.shutdown()
+    assert not seen.get("x-api-key")
 
 
 # ── standalone runner (py tests/test_usage_gateway.py) ───────────────────────

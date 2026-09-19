@@ -107,6 +107,10 @@ from bench.schema import CallUsage
 # ── upstream modes ────────────────────────────────────────────────────────────
 MODE_VERTEX = "vertex"            # gateway IS the AnthropicVertex native bridge (default)
 MODE_PASSTHROUGH = "passthrough"  # gateway forwards verbatim to an upstream URL
+MODE_ANTHROPIC = "anthropic"      # passthrough to api.anthropic.com w/ the gateway's REAL key
+
+# The Anthropic public API base used by MODE_ANTHROPIC when no upstream is given.
+ANTHROPIC_API_BASE = "https://api.anthropic.com"
 
 # ── Vertex defaults (claude-sonnet on Vertex via AnthropicVertex + ADC) ──────
 # Auth is Application Default Credentials on the box (gcloud auth application-default
@@ -717,6 +721,13 @@ def make_handler(upstream_base: str, sink: UsageSink,
                       event dicts that mimic the SDK's events.
     """
     base = upstream_base.rstrip("/")
+    # MODE_ANTHROPIC forwards verbatim to the Anthropic public API, but the
+    # gateway (not Claude Code) holds the REAL key: Claude Code attaches only a
+    # dummy bridge token, which we strip and replace with x-api-key below. The
+    # key is read from the gateway process env and NEVER logged/recorded.
+    if mode == MODE_ANTHROPIC and not base:
+        base = ANTHROPIC_API_BASE
+    _anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") if mode == MODE_ANTHROPIC else ""
     extra_headers = dict(default_headers or {})
     _complete = completion_fn or _make_vertex_completion(vertex_project, vertex_location)
 
@@ -922,11 +933,22 @@ def make_handler(upstream_base: str, sink: UsageSink,
             # default_headers only where the client didn't set the key.
             fwd_headers: dict[str, str] = {}
             for k, v in self.headers.items():
-                if k.lower() in _HOP_BY_HOP or k.lower() == RUN_ID_HEADER:
+                kl = k.lower()
+                if kl in _HOP_BY_HOP or kl == RUN_ID_HEADER:
+                    continue
+                # MODE_ANTHROPIC: drop the client's (dummy bridge) auth — the
+                # gateway injects the real key below. Other modes preserve auth.
+                if _anthropic_key and kl in ("authorization", "x-api-key"):
                     continue
                 fwd_headers[k] = v
             for k, v in extra_headers.items():
                 fwd_headers.setdefault(k, v)
+            if _anthropic_key:
+                # Real Anthropic key held by the gateway (never seen by Claude Code
+                # and never written to any usage row or trace — headers are not logged).
+                fwd_headers["x-api-key"] = _anthropic_key
+                fwd_headers.pop("Authorization", None)
+                fwd_headers.setdefault("anthropic-version", "2023-06-01")
             # ask the upstream for an unencoded body so we can tee/parse it.
             fwd_headers["Accept-Encoding"] = "identity"
 
@@ -1150,9 +1172,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Anthropic usage-logging gateway "
                                  "(Vertex bridge or passthrough)")
     ap.add_argument("--mode", default=os.environ.get("CCB_GATEWAY_MODE", MODE_VERTEX),
-                    choices=[MODE_VERTEX, MODE_PASSTHROUGH],
+                    choices=[MODE_VERTEX, MODE_PASSTHROUGH, MODE_ANTHROPIC],
                     help="vertex: AnthropicVertex native bridge (default); "
-                         "passthrough: forward verbatim to --upstream")
+                         "passthrough: forward verbatim to --upstream; "
+                         "anthropic: forward to api.anthropic.com with the "
+                         "gateway's real ANTHROPIC_API_KEY (Claude Code holds only "
+                         "the dummy bridge token)")
     ap.add_argument("--upstream", default=os.environ.get("CCB_GATEWAY_UPSTREAM",
                                                           "https://api.anthropic.com"),
                     help="(passthrough mode) upstream base URL to forward to")

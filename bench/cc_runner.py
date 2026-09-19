@@ -91,7 +91,7 @@ from bench.schema import RunRecord
 # — safe to import eagerly; we need RUN_ID_HEADER to tag Claude Code's forwarded
 # usage and the Vertex defaults to wire the bottom bridge.
 from bench.usage_gateway import (
-    MODE_VERTEX, RUN_ID_HEADER, UsageGateway, UsageSink,
+    MODE_ANTHROPIC, MODE_VERTEX, RUN_ID_HEADER, UsageGateway, UsageSink,
     VERTEX_LOCATION, VERTEX_MODEL, VERTEX_PROJECT,
 )
 
@@ -111,7 +111,7 @@ DEFAULT_MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
 # litellm + ADC). These select the Vertex endpoint; auth is ADC on the box
 # (gcloud auth application-default login) — no API key. Overridable via env
 # (VERTEX_MODEL / VERTEX_PROJECT / VERTEX_LOCATION; defaults live in usage_gateway).
-GATEWAY_MODE = MODE_VERTEX
+GATEWAY_MODE = os.environ.get("CCB_GATEWAY_MODE", MODE_VERTEX)
 
 # Dummy/bridge token handed to Claude Code as ANTHROPIC_AUTH_TOKEN. Claude Code
 # only needs a NON-EMPTY token to attach to the proxy/gateway; the real Vertex

@@ -56,7 +56,7 @@ import os
 import time
 
 from bench.usage_gateway import (
-    MODE_PASSTHROUGH, MODE_VERTEX,
+    MODE_ANTHROPIC, MODE_PASSTHROUGH, MODE_VERTEX,
     UsageGateway,
     VERTEX_LOCATION, VERTEX_MODEL, VERTEX_PROJECT,
 )
@@ -91,9 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "by the x-ccb-run-id header (default runs/usage / "
                          "$CCB_GATEWAY_USAGE_DIR). cc_runner reads the SAME dir.")
     ap.add_argument("--mode", default=os.environ.get("CCB_GATEWAY_MODE", MODE_VERTEX),
-                    choices=[MODE_VERTEX, MODE_PASSTHROUGH],
+                    choices=[MODE_VERTEX, MODE_PASSTHROUGH, MODE_ANTHROPIC],
                     help="vertex: AnthropicVertex native bridge (default); "
-                         "passthrough: forward verbatim to --upstream")
+                         "passthrough: forward verbatim to --upstream; "
+                         "anthropic: forward to api.anthropic.com with the "
+                         "gateway's real ANTHROPIC_API_KEY (Claude Code holds only "
+                         "the dummy bridge token)")
     ap.add_argument("--upstream",
                     default=os.environ.get("CCB_GATEWAY_UPSTREAM", "https://api.anthropic.com"),
                     help="(passthrough mode) upstream base URL to forward to")
