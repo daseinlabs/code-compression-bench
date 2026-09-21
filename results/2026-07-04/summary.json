@@ -43,6 +43,20 @@
       "cr_cw": 40.4,
       "input_vs_a0_pct": -18.7
     },
+    "fermat": {
+      "n": 100,
+      "solved": 55,
+      "calls": 3883,
+      "input_tokens": 211453794,
+      "cache_read": 205535671,
+      "cache_write": 5793246,
+      "output_tokens": 2428239,
+      "cost_total": 115.09,
+      "cost_per_solved": 2.09,
+      "vs_a0_pct": -21.9,
+      "cr_cw": 35.5,
+      "input_vs_a0_pct": -32.3
+    },
     "woz": {
       "n": 100,
       "solved": 55,
