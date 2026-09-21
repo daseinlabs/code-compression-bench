@@ -144,24 +144,24 @@ The complete per-arm rollup. Best value in each row is in bold.
 | Cost per solved task | **$1.45** | $2.05 | $2.09 | $2.33 | $2.58 | $3.07 | $3.66 |
 | Cost per solved task vs baseline | **−44%** | −21% | −19% | −10% | — | +19% | +42% |
 | Total cost | **$89.65** | $118.99 | $115.09 | $128.28 | $147.30 | $165.77 | $212.14 |
-| List-price cost (no cache discount) | **$456** | $733 | $671 | $635 | $862 | $1,015 | $908 |
+| List-price cost (no cache discount) | **$456** | $733 | $643 | $635 | $862 | $1,015 | $908 |
 | Total cost vs baseline | **−39%** | −19% | −22% | −13% | — | +13% | +44% |
 | Input tokens | **144.8M** | 253.8M | 211.5M | 203.1M | 312.2M | 360.7M | 329.6M |
 | Input tokens vs baseline | **−54%** | −19% | −32% | −35% | — | +16% | +6% |
 | Output tokens | **1.71M** | 2.11M | 2.43M | 2.95M | 3.00M | 3.22M | 2.95M |
 | Agent steps | 4,856 | 4,895 | 3,883 | **3,322** | 5,325 | 6,131 | 5,850 |
 | Wall-clock hours | **10.8** | 12.0 | 12.2 | 17.8 | 14.4 | 16.2 | 16.3 |
-| Mean latency per call | **6.2 s** | 6.9 s | 11.3 s | 14.3 s | 8.8 s | 9.3 s | 8.0 s |
+| Mean latency per call | **6.2 s** | 6.9 s | 8.2 s | 14.3 s | 8.8 s | 9.3 s | 8.0 s |
 | Peak working context (mean) | **41.4K** | 70.1K | 62.6K | 83.2K | 79.8K | 81.6K | 76.7K |
-| Cache hit rate | 93.9% | 96.6% | 97.2% | 95.0% | 97.0% | **97.3%** | 92.4% |
+| Cache hit rate | 93.9% | 96.6% | 96.5% | 95.0% | 97.0% | **97.3%** | 92.4% |
 | Cache read:write ratio | 22.6 | 40.4 | 35.5 | 24.7 | 41.6 | **46.4** | 11.3 |
 | Runs ended by context limit | 3 | 1 | **0** | **0** | 2 | 2 | **0** |
 | API calls | 4,683 | 4,895 | 3,883 | 3,005 | 4,084 | 4,964 | 4,504 |
 
 Cache read:write is the ratio of cached-prefix reads to cache writes; a lower ratio means the layer re-pays
 the cache-write rate more often. Fermat ran at workers = 8; its wall-clock is summed per-task wall time
-(12.2 h; elapsed ≈ 1.9 h) and its mean latency is that Σwall-time ÷ API calls, so the per-call latency is
-not concurrency-comparable to the July arms.
+(12.2 h; elapsed ≈ 1.9 h). Its mean latency (8.2 s) is the mean per-call latency from the model-API
+usage series — computed exactly as for the July arms.
 
 ## Vendor claims versus measured
 
@@ -194,6 +194,8 @@ in **[FACT-VS-FICTION.md](FACT-VS-FICTION.md)**.
   the run is ~2.5 months newer and the Vertex `claude-sonnet-4-6` alias may resolve to a different snapshot,
   Fermat's solve count is method-comparable but not a same-day paired draw; strict comparability would
   require re-grading the July arms on harness `72482cc` (out of scope here).
+- **Most-recent run only.** Each arm’s reported numbers are from its most recent complete 100-task run;
+  earlier runs (smokes, aborted or bug-affected runs) are not reported for any arm.
 - **One task set.** 100 tasks from [SWE-bench Verified](https://www.swebench.com/); the exact instances are
   listed in [`paired.csv`](results/2026-07-04/paired.csv). Each task runs in a checkout at the SWE-bench base
   commit with its git history removed, so the reference patch is not reachable from the repository itself.

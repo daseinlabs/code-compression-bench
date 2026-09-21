@@ -10,7 +10,9 @@ The controlled benchmark is described in the [README](README.md). In one line: o
 Claude Code), one model (`claude-sonnet-4-6` on Vertex), 100 tasks from SWE-bench Verified, the official
 SWE-bench Docker grader, and one cache-aware price table applied to every arm's real per-call usage at the
 rates of the model that served each call. The matched set is the 100 SWE-bench Verified tasks every measured
-arm completed (run 2026-07-04). Per-task data: [`results/2026-07-04/paired.csv`](results/2026-07-04/paired.csv).
+arm completed (run 2026-07-04). Per-task data: [`results/2026-07-04/paired.csv`](results/2026-07-04/paired.csv). Each arm’s reported
+numbers are from its most recent complete 100-task run; earlier runs (smokes, aborted or bug-affected
+runs) are not reported for any arm.
 
 This is not an accusation of dishonesty. Several of these vendors disclose their methods and limits plainly,
 and we quote those disclosures because they are the most important part of the story. The thesis is narrow
