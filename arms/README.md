@@ -126,6 +126,38 @@ CLI prints `WozCode session is stale`) and no session file is written — re-run
   so without a session the agent has no working tools). Set `WOZ_SKIP_SESSION_CHECK=1` only when a
   valid session is proven out-of-band.
 
+## fermat — Quotient Labs “Fermat's Last Token” shim (paid, entitlement-gated)
+Fermat ([quotientlabs.com](https://quotientlabs.com); install `curl -fsSL
+https://downloads.quotientlabs.com/fermat/install.sh | bash && fermat login`) ships a Node runtime whose
+`claude` shim starts a local proxy **gateway daemon** and spawns the real Claude Code pointed at it, forcing
+its `fermat-code` agent and attaching two MCP **facades** (`mcp__fermat-search__Search` /
+`mcp__fermat-edit__Edit`) while **removing** the native file tools. The arm drives that shim unmodified; see
+[`arms/fermat.py`](fermat.py).
+- **What it is:** the vendor's shipped shim — MCP Search/Edit facades + a native-file tool gate; reads come
+  back as windowed, line-numbered file slices with a paging footer, and edits must target a range already
+  viewed through `Search`. It makes `claude-haiku-4-5` side-calls through its own gateway.
+- **Env** (all `FERMAT_*`; placeholders in [`.env.example`](../.env.example), real values never committed):
+  - `FERMAT_SHIM` (**required**) — path to the Fermat `claude` shim (e.g. `~/fermat/bin/claude`).
+  - `FERMAT_BIN` — the `fermat` CLI (whoami/--version); default: sibling of the shim, else `fermat` on PATH.
+  - `FERMAT_RUNTIME` — Fermat runtime dir; default `<dirname(dirname(FERMAT_SHIM))>/runtime`.
+  - `FERMAT_CLAUDE_BIN` — the real `claude` executable Fermat wraps.
+  - `FERMAT_UPSTREAM` — proxy upstream = this run's gateway URL (mirrored to `FERMAT_UPSTREAM_BASE_URL` /
+    `FILETOFISH_UPSTREAM`).
+  - `FERMAT_API_TOKEN` — Stage-2/3 bearer, loaded from `~/secrets/fermat.env`; forwarded, never logged.
+  - `FERMAT_CREDENTIALS` — login credentials json; default `~/.fermat/credentials`.
+  - `FERMAT_AUTH_URL` — auth base for the token refresh (placeholder; Fermat's own default is decoded from
+    the installed runtime, else `https://auth.quotientlabs.com`).
+  - `FERMAT_SUPABASE_ANON_KEY` (alias `FERMAT_AUTH_APIKEY`) — Fermat's **public** Supabase client anon key
+    for the refresh call (placeholder; Fermat decodes its own value live from the installed runtime bundle).
+- **Auth = a paid `fermat login` (browser OAuth), NOT a server env var.** Entitlement is checked at run time;
+  without an entitled Quotient Labs account the arm **skips to vanilla** (native Claude Code, no facades).
+- **Run:** install + `fermat login`, set `FERMAT_SHIM` (and `FERMAT_API_TOKEN` for headless refresh), then
+  `make bench ARM=fermat`.
+- **Reproducibility (disclosed):** unlike `rtk`/`edgee`/`headroom`, Fermat has **no `selfhost/` recipe** —
+  the runtime is a closed, entitlement-gated vendor bundle. Outsiders **cannot reproduce Fermat without a
+  paid, entitled Quotient Labs account**, so this arm is **not independently reproducible**; its result row
+  is disclosed as such (see the README leaderboard note and FACT-VS-FICTION.md).
+
 ## bear — The Token Company API (TransformArm)
 Calls bear's compress API on the message array (`target_ratio = COMPRESSION_TARGET_RATIO`,
 default `0.5`), then the scaffold calls the model normally.

@@ -26,6 +26,11 @@ compression layer changes, so any difference in cost or quality is attributable 
 
 > Run 2026-07-04 · 100 tasks from SWE-bench Verified · model `claude-sonnet-4-6` · cache-aware pricing ·
 > official SWE-bench Docker grader.
+>
+> **Fermat** was added on 2026-09-21 and was **not** part of the 2026-07-04 batch. It was run on the same
+> 100 SWE-bench Verified instances, model `claude-sonnet-4-6`, on benchmark harness commit `72482cc`
+> (Claude Code 2.1.183; grader dataset pinned by `ddd031e`), using the same cache-aware cost method — see
+> the note under the leaderboard on comparability.
 
 ## Leaderboard
 
@@ -33,14 +38,23 @@ compression layer changes, so any difference in cost or quality is attributable 
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1 | **Parsec** | **62 / 100** | **$1.45** | **−44%** | **$89.65** | **−39%** | **144.8M** | **−54%** | **10.8 h** | **−25%** | 22.6 |
 | 2 | Caveman | 58 / 100 | $2.05 | −21% | $118.99 | −19% | 253.8M | −19% | 12.0 h | −17% | 40.4 |
-| 3 | Woz | 55 / 100 | $2.33 | −10% | $128.28 | −13% | 203.1M | −35% | 17.8 h | +23% | 24.7 |
-| 4 | Baseline (no compression) | 57 / 100 | $2.58 | — | $147.30 | — | 312.2M | — | 14.4 h | — | 41.6 |
-| 5 | RTK | 54 / 100 | $3.07 | +19% | $165.77 | +13% | 360.7M | +16% | 16.2 h | +12% | 46.4 |
-| 6 | Headroom | 58 / 100 | $3.66 | +42% | $212.14 | +44% | 329.6M | +6% | 16.3 h | +13% | 11.3 |
+| 3 | Fermat † | 55 / 100 | $2.09 | −19% | $115.09 | −22% | 211.45M | −32% | 12.2 h | −15% | 35.5 |
+| 4 | Woz | 55 / 100 | $2.33 | −10% | $128.28 | −13% | 203.1M | −35% | 17.8 h | +23% | 24.7 |
+| 5 | Baseline (no compression) | 57 / 100 | $2.58 | — | $147.30 | — | 312.2M | — | 14.4 h | — | 41.6 |
+| 6 | RTK | 54 / 100 | $3.07 | +19% | $165.77 | +13% | 360.7M | +16% | 16.2 h | +12% | 46.4 |
+| 7 | Headroom | 58 / 100 | $3.66 | +42% | $212.14 | +44% | 329.6M | +6% | 16.3 h | +13% | 11.3 |
 
-Arms are ranked by cost per solved task. Three fall below the no-compression baseline — Parsec ($1.45),
-Caveman ($2.05), and Woz ($2.33); RTK ($3.07) and Headroom ($3.66) fall above it. On total cost, Parsec
-(−39%), Caveman (−19%), and Woz (−13%) are below the baseline and RTK (+13%) and Headroom (+44%) above.
+† **Fermat** was not part of the 2026-07-04 batch; it was run 2026-09-21 on the same 100 SWE-bench Verified
+instances (harness commit `72482cc`, Claude Code 2.1.183, model `claude-sonnet-4-6` on Vertex, workers = 8,
+same grader dataset pin and cost method). Because it ran ~2.5 months later on a newer harness — and the
+Vertex `claude-sonnet-4-6` alias may not resolve to the identical July snapshot — its solve count is
+comparable in method but is **not** a same-day paired draw against the July arms. Wall-clock is the sum of
+per-task wall time (12.2 h) at workers = 8, reported the same way as the July arms (elapsed was ~1.9 h).
+
+Arms are ranked by cost per solved task. Four fall below the no-compression baseline — Parsec ($1.45),
+Caveman ($2.05), Fermat ($2.09), and Woz ($2.33); RTK ($3.07) and Headroom ($3.66) fall above it. On total
+cost, Parsec (−39%), Caveman (−19%), Fermat (−22%), and Woz (−13%) are below the baseline and RTK
+(+13%) and Headroom (+44%) above.
 Parsec and Caveman also solve more tasks than the baseline (62 and 58 of 100 versus 57).
 
 The leaderboard uses cache-aware pricing. At undiscounted list price (no cache credit) the ranking is
@@ -124,28 +138,30 @@ upper-right region is cheaper and solves more; only Parsec falls in it (62 solve
 
 The complete per-arm rollup. Best value in each row is in bold.
 
-| KPI | Parsec | Caveman | Woz | Baseline | RTK | Headroom |
-|---|---:|---:|---:|---:|---:|---:|
-| Tasks solved (of 100) | **62** | 58 | 55 | 57 | 54 | 58 |
-| Cost per solved task | **$1.45** | $2.05 | $2.33 | $2.58 | $3.07 | $3.66 |
-| Cost per solved task vs baseline | **−44%** | −21% | −10% | — | +19% | +42% |
-| Total cost | **$89.65** | $118.99 | $128.28 | $147.30 | $165.77 | $212.14 |
-| List-price cost (no cache discount) | **$456** | $733 | $635 | $862 | $1,015 | $908 |
-| Total cost vs baseline | **−39%** | −19% | −13% | — | +13% | +44% |
-| Input tokens | **144.8M** | 253.8M | 203.1M | 312.2M | 360.7M | 329.6M |
-| Input tokens vs baseline | **−54%** | −19% | −35% | — | +16% | +6% |
-| Output tokens | **1.71M** | 2.11M | 2.95M | 3.00M | 3.22M | 2.95M |
-| Agent steps | 4,856 | 4,895 | **3,322** | 5,325 | 6,131 | 5,850 |
-| Wall-clock hours | **10.8** | 12.0 | 17.8 | 14.4 | 16.2 | 16.3 |
-| Mean latency per call | **6.2 s** | 6.9 s | 14.3 s | 8.8 s | 9.3 s | 8.0 s |
-| Peak working context (mean) | **41.4K** | 70.1K | 83.2K | 79.8K | 81.6K | 76.7K |
-| Cache hit rate | 93.9% | 96.6% | 95.0% | 97.0% | **97.3%** | 92.4% |
-| Cache read:write ratio | 22.6 | 40.4 | 24.7 | 41.6 | **46.4** | 11.3 |
-| Runs ended by context limit | 3 | 1 | **0** | 2 | 2 | **0** |
-| API calls | 4,683 | 4,895 | 3,005 | 4,084 | 4,964 | 4,504 |
+| KPI | Parsec | Caveman | Fermat | Woz | Baseline | RTK | Headroom |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Tasks solved (of 100) | **62** | 58 | 55 | 55 | 57 | 54 | 58 |
+| Cost per solved task | **$1.45** | $2.05 | $2.09 | $2.33 | $2.58 | $3.07 | $3.66 |
+| Cost per solved task vs baseline | **−44%** | −21% | −19% | −10% | — | +19% | +42% |
+| Total cost | **$89.65** | $118.99 | $115.09 | $128.28 | $147.30 | $165.77 | $212.14 |
+| List-price cost (no cache discount) | **$456** | $733 | $671 | $635 | $862 | $1,015 | $908 |
+| Total cost vs baseline | **−39%** | −19% | −22% | −13% | — | +13% | +44% |
+| Input tokens | **144.8M** | 253.8M | 211.5M | 203.1M | 312.2M | 360.7M | 329.6M |
+| Input tokens vs baseline | **−54%** | −19% | −32% | −35% | — | +16% | +6% |
+| Output tokens | **1.71M** | 2.11M | 2.43M | 2.95M | 3.00M | 3.22M | 2.95M |
+| Agent steps | 4,856 | 4,895 | 3,883 | **3,322** | 5,325 | 6,131 | 5,850 |
+| Wall-clock hours | **10.8** | 12.0 | 12.2 | 17.8 | 14.4 | 16.2 | 16.3 |
+| Mean latency per call | **6.2 s** | 6.9 s | 11.3 s | 14.3 s | 8.8 s | 9.3 s | 8.0 s |
+| Peak working context (mean) | **41.4K** | 70.1K | 62.6K | 83.2K | 79.8K | 81.6K | 76.7K |
+| Cache hit rate | 93.9% | 96.6% | 97.2% | 95.0% | 97.0% | **97.3%** | 92.4% |
+| Cache read:write ratio | 22.6 | 40.4 | 35.5 | 24.7 | 41.6 | **46.4** | 11.3 |
+| Runs ended by context limit | 3 | 1 | **0** | **0** | 2 | 2 | **0** |
+| API calls | 4,683 | 4,895 | 3,883 | 3,005 | 4,084 | 4,964 | 4,504 |
 
 Cache read:write is the ratio of cached-prefix reads to cache writes; a lower ratio means the layer re-pays
-the cache-write rate more often.
+the cache-write rate more often. Fermat ran at workers = 8; its wall-clock is summed per-task wall time
+(12.2 h; elapsed ≈ 1.9 h) and its mean latency is that Σwall-time ÷ API calls, so the per-call latency is
+not concurrency-comparable to the July arms.
 
 ## Vendor claims versus measured
 
@@ -160,6 +176,7 @@ QA, shell-command output in isolation, token counts with no task-success check, 
 | Woz | "Cut your Claude Code costs in half" | Live-session API usage, undisclosed task mix; quality on Opus 4.7 vs an Opus 4.6 baseline | −13% cost, 55 solved, 23% slower |
 | RTK | "60–90% fewer tokens on common dev commands" | Shell-command output in isolation (its own README: native Read/Grep/Glob bypass the hook) | +16% input, +13% cost, 54 solved |
 | Headroom | "60–95% fewer tokens, same answers" | Single-shot QA (GSM8K, SQuAD…); its docs: "code passes through" uncompressed | +6% input, +44% cost (most expensive), 58 solved |
+| Fermat | "47% cheaper on average" ([quotientlabs.com](https://quotientlabs.com)) | Its own SessionBench / SWE-Atlas suite (Scale AI refactoring tasks), not this SWE-bench Verified set | −22% cost, 55 solved (added 2026-09-21; see note below) |
 
 This is a summary of the arms that ran. The detailed, fully-sourced breakdown of every layer — every quote,
 every primary source, the exact benchmark each number was measured on, and the mechanism behind each gap — is
@@ -170,6 +187,13 @@ in **[FACT-VS-FICTION.md](FACT-VS-FICTION.md)**.
 - **One scaffold.** A fixed agent: headless Claude Code, driven through the Python Claude Agent SDK,
   identical system prompt, tools, and caps for every arm.
 - **One model.** `claude-sonnet-4-6` for every arm.
+- **One batch, with one exception.** The July arms ran together on 2026-07-04; the public repo does not
+  record the Claude Code CLI version for that batch (it is unrecorded). **Fermat** was run later, on
+  2026-09-21, on Claude Code 2.1.183 and benchmark harness commit `72482cc` (grader dataset pinned by
+  `ddd031e`), on the same model string `claude-sonnet-4-6` — the nominal model name did not change. Because
+  the run is ~2.5 months newer and the Vertex `claude-sonnet-4-6` alias may resolve to a different snapshot,
+  Fermat's solve count is method-comparable but not a same-day paired draw; strict comparability would
+  require re-grading the July arms on harness `72482cc` (out of scope here).
 - **One task set.** 100 tasks from [SWE-bench Verified](https://www.swebench.com/); the exact instances are
   listed in [`paired.csv`](results/2026-07-04/paired.csv). Each task runs in a checkout at the SWE-bench base
   commit with its git history removed, so the reference patch is not reachable from the repository itself.

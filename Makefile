@@ -8,7 +8,7 @@
 PY ?= python3
 # baseline (A0) is the measured control savings are computed against — always include it.
 # bear is no-op (sales-gated) so it's omitted; the runner also skips any unready arm.
-ARMS ?= baseline,dasein,woz,edgee,rtk,headroom,compresr
+ARMS ?= baseline,dasein,woz,edgee,rtk,headroom,compresr,fermat
 TASKS ?= tasks.json
 WORKERS ?= 8
 # Where each task repo is checked out at base_commit (the agent's cwd per instance).

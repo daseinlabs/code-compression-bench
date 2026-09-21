@@ -29,10 +29,18 @@ and entirely evidence-based:
 Arms are ranked by cost per solved task — cache-aware total cost divided by the tasks the official grader
 passed.
 
+† **Fermat** was not part of the 2026-07-04 batch. It was run 2026-09-21 on the same 100 SWE-bench Verified
+instances (Claude Code 2.1.183, benchmark harness commit `72482cc`, grader dataset pinned by `ddd031e`,
+model `claude-sonnet-4-6` on Vertex, workers = 8), with the same cache-aware cost method as the July arms.
+Because it ran ~2.5 months later on a newer harness, and the Vertex `claude-sonnet-4-6` alias may not
+resolve to the identical July snapshot, its solve count is comparable in method but is not a same-day
+paired draw against the July arms.
+
 | Arm | Solved | $ / solved | Total cost | vs baseline | Input tokens | vs baseline | Wall-clock | Cache R:W |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | **Parsec** | **62/100** | **$1.45** | **$89.65** | **−39%** | **144.8M** | **−54%** | **10.8 h** | 22.6 |
 | Caveman | 58/100 | $2.05 | $118.99 | −19% | 253.8M | −19% | 12.0 h | 40.4 |
+| Fermat † | 55/100 | $2.09 | $115.09 | −22% | 211.45M | −32% | 12.2 h | 35.5 |
 | Woz | 55/100 | $2.33 | $128.28 | −13% | 203.1M | −35% | 17.8 h | 24.7 |
 | Baseline (no compression) | 57/100 | $2.58 | $147.30 | — | 312.2M | — | 14.4 h | 41.6 |
 | RTK | 54/100 | $3.07 | $165.77 | +13% | 360.7M | +16% | 16.2 h | 46.4 |
@@ -73,6 +81,55 @@ touches it.
 
 **Verdict.** The output reduction is genuine but measures near 30% here, not 65%, and it is scoped to
 output. Total cost was 19% below the no-compression baseline.
+
+---
+
+## Fermat
+
+**What it is.** Quotient Labs' “Fermat's Last Token”, run as its shipped `claude` shim. The arm installs a
+Node runtime whose shim starts a local proxy **gateway daemon** and spawns the real Claude Code pointed at
+that proxy, forcing its own `fermat-code` agent. It replaces the agent's file tools with two MCP **facades**:
+the only file tools wired in are `mcp__fermat-search__Search` and `mcp__fermat-edit__Edit` (plus native
+`Bash` and `Agent`); native `Read`, `Edit`, `Write`, `Grep`, `Glob`, and `NotebookEdit` are **removed**
+(`disallowed_tools`). “Reading a file” is a `Search` with a file-path pattern, which returns **windowed,
+line-numbered raw file bytes** with an in-band paging footer of the form
+`[showing lines 714-738 of 1530 total. Continue with lineOffset=739.]`. The `Edit` facade only accepts edits
+to files and line ranges the model has already **viewed through Search**, and it tracks exactly which line
+windows were seen. It also makes `claude-haiku-4-5` **side-calls** through its own gateway.
+
+### Claims (verbatim, sourced)
+
+| Claim | Source | What it was measured on |
+|---|---|---|
+| “47% cheaper on average” | [quotientlabs.com](https://quotientlabs.com) | Quotient's own **SessionBench / SWE-Atlas** suite (real refactoring tasks from Scale AI) — a different task set and grader, not the 100 SWE-bench Verified instances measured here. |
+| “Stop overpaying Claude for tokens it doesn't need.” | [quotientlabs.com](https://quotientlabs.com) | Product tagline; no task-success or dollar-cost figure attached. |
+
+### What we observed
+
+55 of 100 solved, at a cache-aware total of $115.09 — **−22%** under the no-compression baseline — and
+$2.09 per solved task, on 211.45M input tokens (−32% vs baseline) and 12.2 h of summed wall time. In a
+trajectory audit of the arm across the 100 tasks, the model overwhelmingly read through `Bash`, not the
+Search facade: **Bash = 4067** tool calls versus **Search = 155**, with `ToolSearch = 181`,
+`mcp__fermat-edit__Edit = 170`, and `Agent = 13`. Of the 170 Edit-facade calls, **53 were rejected
+`not_in_session`** (“File has not been read in this session … Run Search first”) and one `partial_view`
+(edit targeted lines the model had not seen through Search); the arm also issued 746 `claude-haiku-4-5`
+side-calls ($2.55, included in the cost above). Four rows fell back to vanilla and are counted as-is.
+
+### Why the gap
+
+The compression display is coherent and self-describing — windowed reads, line totals, a page cursor, and
+recovery instructions on every rejection — but it is **decoupled from how the model actually reads**. Because
+native `Read`/`Grep`/`Glob` are gone and `Bash` is left native and uncompressed, the model reads with
+`cat`/`sed`/`grep` (~23 reads before its first edit), so the Edit facade — which only recognizes files and
+ranges seen *through Search* — rejects those edits `not_in_session`, and real Search paging is near-zero. The
+“47% cheaper” headline is measured on Quotient's own SessionBench / SWE-Atlas suite, a different benchmark
+and grader; on this SWE-bench Verified set the measured cache-aware saving is −22%.
+
+**Verdict.** A genuine cache-aware saving — −22% total cost, 55 of 100 solved at $2.09 per solved task — driven
+by MCP Search/Edit facades over a windowed view of the codebase. The mechanism is coherent but decoupled
+from the agent's Bash-based reading, and the advertised 47% is measured on a different benchmark, not this
+one. Comparability caveat: Fermat was run 2026-09-21 on a newer harness than the July arms (see the note
+under the table above).
 
 ---
 
