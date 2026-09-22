@@ -26,11 +26,6 @@ compression layer changes, so any difference in cost or quality is attributable 
 
 > Run 2026-07-04 · 100 tasks from SWE-bench Verified · model `claude-sonnet-4-6` · cache-aware pricing ·
 > official SWE-bench Docker grader.
->
-> **Fermat** was added on 2026-09-21 and was **not** part of the 2026-07-04 batch. It was run on the same
-> 100 SWE-bench Verified instances, model `claude-sonnet-4-6`, on benchmark harness commit `72482cc`
-> (Claude Code 2.1.183; grader dataset pinned by `ddd031e`), using the same cache-aware cost method — see
-> the note under the leaderboard on comparability.
 
 ## Leaderboard
 
@@ -44,12 +39,7 @@ compression layer changes, so any difference in cost or quality is attributable 
 | 6 | RTK | 54 / 100 | $3.07 | +19% | $165.77 | +13% | 360.7M | +16% | 16.2 h | +12% | 46.4 |
 | 7 | Headroom | 58 / 100 | $3.66 | +42% | $212.14 | +44% | 329.6M | +6% | 16.3 h | +13% | 11.3 |
 
-† **Fermat** was not part of the 2026-07-04 batch; it was run 2026-09-21 on the same 100 SWE-bench Verified
-instances (harness commit `72482cc`, Claude Code 2.1.183, model `claude-sonnet-4-6` on Vertex, workers = 8,
-same grader dataset pin and cost method). Because it ran ~2.5 months later on a newer harness — and the
-Vertex `claude-sonnet-4-6` alias may not resolve to the identical July snapshot — its solve count is
-comparable in method but is **not** a same-day paired draw against the July arms. Wall-clock is the sum of
-per-task wall time (12.2 h) at workers = 8, reported the same way as the July arms (elapsed was ~1.9 h).
+† Fermat was run 2026-09-21 (not in the July batch) — see [Fermat run notes](#fermat-run-notes).
 
 Arms are ranked by cost per solved task. Four fall below the no-compression baseline — Parsec ($1.45),
 Caveman ($2.05), Fermat ($2.09), and Woz ($2.33); RTK ($3.07) and Headroom ($3.66) fall above it. On total
@@ -219,6 +209,15 @@ included.
 
 Holding the scaffold and model fixed is what makes the per-arm delta clean; it also means the ordering is
 specific to headless Claude Code on `claude-sonnet-4-6`.
+
+## Fermat run notes
+
+**Fermat** was not part of the 2026-07-04 batch; it was run 2026-09-21 on the same 100 SWE-bench Verified
+instances (harness commit `72482cc`, Claude Code 2.1.183, model `claude-sonnet-4-6` on Vertex, workers = 8,
+same grader dataset pin and cost method). Because it ran ~2.5 months later on a newer harness — and the
+Vertex `claude-sonnet-4-6` alias may not resolve to the identical July snapshot — its solve count is
+comparable in method but is **not** a same-day paired draw against the July arms. Wall-clock is the sum of
+per-task wall time (12.2 h) at workers = 8, reported the same way as the July arms (elapsed was ~1.9 h).
 
 ## Reproduce
 
